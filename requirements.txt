@@ -1,0 +1,12 @@
+torch
+transformers
+pyaudio
+numpy
+groq
+noisereduce
+langdetect
+requests
+psycopg[binary]
+qdrant-client
+sentence-transformers
+nats-py

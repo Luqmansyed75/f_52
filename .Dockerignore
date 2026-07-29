@@ -1,0 +1,60 @@
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+test_Agent/
+
+# VS Code and editor settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Node
+node_modules/
+
+# Secrets and local config
+.env
+.env.*
+secrets/
+
+# Large model and binary files
+*.onnx
+*.ort
+en_US-lessac-medium.onnx
+en_US-lessac-medium.onnx.json
+piper/
+piper/**
+libtashkeel_model.ort
+
+# Docker / compose overrides
+docker-compose.override.yml
+
+# Misc
+*.pyc
+*.pyo
+*.pyd
+*.egg
+
