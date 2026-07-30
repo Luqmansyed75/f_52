@@ -10,6 +10,10 @@ import numpy as np
 import torch
 import pyaudio
 from transformers import VitsModel, AutoTokenizer
+from core.logger import get_tts_logger
+from core.error_handler import handle_errors
+
+logger = get_tts_logger()
 
 
 MMS_TTS_MODELS = {
@@ -34,6 +38,7 @@ class MMSTTS:
 
         self.pa = pyaudio.PyAudio()
 
+    @handle_errors(logger)
     def speak(self, text: str, language: str = "hi"):
         model = self.models.get(language)
         tokenizer = self.tokenizers.get(language)

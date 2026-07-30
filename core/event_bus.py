@@ -20,6 +20,10 @@ import nats
 from nats.js.api import StreamConfig
 
 import config
+from core.logger import get_events_logger
+from core.error_handler import safe_execute
+
+logger = get_events_logger()
 
 
 # Subject constants — import these rather than hardcoding subject
@@ -68,6 +72,7 @@ class EventBus:
 
     def publish(self, subject: str, payload: dict) -> None:
         """Synchronously publish a JSON-serializable payload to a subject."""
+        logger.debug("Publishing to '%s'", subject)
         data = json.dumps(payload).encode("utf-8")
         future = asyncio.run_coroutine_threadsafe(
             self._js.publish(subject, data), self._loop
@@ -75,7 +80,7 @@ class EventBus:
         try:
             future.result(timeout=5)
         except Exception as e:
-            print(f"[event_bus] Publish failed for '{subject}': {e}")
+            logger.error("Publish failed for '%s': %s", subject, e, exc_info=True)
 
     def subscribe(self, subject: str, handler: Callable[[dict], None], durable: str = None) -> None:
         """
@@ -85,6 +90,7 @@ class EventBus:
         handlers fast or dispatch to your own worker thread if needed).
         """
         durable = durable or subject.replace(".", "_")
+        logger.info("Subscribing to '%s' (durable: %s)", subject, durable)
 
         async def _consume():
             psub = await self._js.pull_subscribe(subject, durable=durable)
@@ -96,10 +102,11 @@ class EventBus:
                 for msg in msgs:
                     try:
                         payload = json.loads(msg.data.decode("utf-8"))
-                        handler(payload)
+                        logger.debug("Received event on '%s'", subject)
+                        safe_execute(logger, handler, payload)
                         await msg.ack()
                     except Exception as e:
-                        print(f"[event_bus] Handler error on '{subject}': {e}")
+                        logger.error("Handler error on '%s': %s", subject, e, exc_info=True)
 
         asyncio.run_coroutine_threadsafe(_consume(), self._loop)
 
