@@ -1,30 +1,101 @@
 # 🎙️ Proxy Agent – AI Meeting Representative
 
-An AI-powered voice meeting assistant capable of listening to conversations, transcribing speech in real time, maintaining conversational context, retrieving relevant meeting information, and responding naturally using speech.
+An event-driven AI Meeting Representative that listens to meetings in real time, understands conversations, retrieves relevant meeting context, and responds naturally through speech.
 
-The project combines speech recognition, meeting memory, semantic retrieval, large language models, speaker diarization, and text-to-speech into a real-time conversational assistant.
+The system is built around a modular architecture where each capability communicates through an internal EventBus, allowing new components such as Memory and Reasoning to be added independently without modifying the core audio pipeline.
 
 ---
 
-# Features
+# Architecture
 
-## ✅ Implemented
+```
+                 ┌──────────────────────┐
+                 │   Microphone Input   │
+                 └──────────┬───────────┘
+                            │
+                     Voice Activity Detection
+                      (Silero VAD)
+                            │
+                            ▼
+                  Faster Whisper ASR
+                            │
+                            ▼
+                  Transcript Assembler
+                            │
+                            ▼
+                    Wake Word Detection
+                            │
+                  Session Management
+                            │
+                            ▼
+                 Semantic Retrieval
+                     (Qdrant)
+                            │
+                            ▼
+                     LLM (Groq)
+                            │
+                            ▼
+                    Piper Text-to-Speech
+```
 
-- Real-time microphone streaming
-- Voice Activity Detection (Silero VAD)
-- Real-time Speech-to-Text (Faster Whisper Large V3 Turbo)
-- Speaker Diarization (Pyannote)
-- Meeting Memory
-- Semantic Search using Qdrant
-- Conversation Memory
-- Context-aware Question Answering
-- LLM Integration (Groq)
-- Text-to-Speech (Piper)
-- Barge-in (Interrupt AI while speaking)
-- Session Management
-- Low-latency streaming pipeline
-- Multi-consumer audio streaming
-- Logging & Error Handling
+The entire pipeline is coordinated through an internal **NATS JetStream EventBus**, enabling loosely coupled communication between modules.
+
+---
+
+# Current Features
+
+## Audio Pipeline
+
+* Real-time microphone streaming
+* Multi-consumer audio streaming
+* Voice Activity Detection (Silero VAD)
+* Faster Whisper Large V3 Turbo
+* Transcript assembly
+* Wake-word detection
+* Conversation session management
+* Barge-in support (interrupt AI speech)
+
+---
+
+## AI Components
+
+* Context-aware conversation
+* Semantic retrieval using Qdrant
+* Speaker diarization
+* Streaming LLM responses
+* Piper Text-to-Speech
+
+---
+
+## Infrastructure
+
+* Event-driven architecture
+* NATS JetStream EventBus
+* Docker support
+* Structured logging
+* Centralized error handling
+* Modular design for independent development
+
+---
+
+# Current Project Structure
+
+```
+audio/
+asr/
+core/
+llm/
+meeting/
+memory/
+streaming/
+tts/
+utils/
+
+main.py
+config.py
+requirements.txt
+docker-compose.yml
+```
 
 ---
 
@@ -32,50 +103,34 @@ The project combines speech recognition, meeting memory, semantic retrieval, lar
 
 ## AI Models
 
-- Faster Whisper Large V3 Turbo
-- Pyannote Speaker Diarization
-- Pyannote Embeddings
-- Silero VAD
-- sentence-transformers/all-mpnet-base-v2
-- Groq LLM
-- Piper TTS
+* Faster Whisper Large V3 Turbo
+* Silero VAD
+* Pyannote Speaker Diarization
+* Pyannote Embeddings
+* sentence-transformers/all-mpnet-base-v2
+* Groq LLM
+* Piper TTS
 
 ---
 
 ## Infrastructure
 
-- Python 3.10+
-- Docker
-- Qdrant
-- Hugging Face
-- PyTorch
-- CUDA (Recommended)
-
----
-
-# Project Structure
-
-```
-audio/
-asr/
-core/
-llm/
-memory/
-meeting/
-streaming/
-tts/
-utils/
-```
+* Python 3.10+
+* Docker
+* NATS JetStream
+* Qdrant Vector Database
+* Hugging Face
+* CUDA (Recommended)
 
 ---
 
 # Requirements
 
-- Python 3.10+
-- Git
-- Docker Desktop
-- NVIDIA GPU (Recommended)
-- CUDA 12.x (Recommended)
+* Python 3.10+
+* Git
+* Docker Desktop
+* NVIDIA GPU (Recommended)
+* CUDA 12.x (Recommended)
 
 ---
 
@@ -119,7 +174,7 @@ pip install -r requirements.txt
 
 ---
 
-## Create .env
+## Environment Variables
 
 Create a `.env` file in the project root.
 
@@ -130,17 +185,9 @@ HF_TOKEN=YOUR_HUGGINGFACE_TOKEN
 
 ---
 
-## Install Docker
+# Docker Services
 
-```bash
-docker --version
-
-docker compose version
-```
-
----
-
-## Start Required Services
+Start the required services.
 
 ```bash
 docker compose up -d
@@ -154,61 +201,21 @@ docker ps
 
 ---
 
-# Models
-
-The following models are downloaded automatically during the first run.
-
-### Speech Recognition
-
-- Faster Whisper Large V3 Turbo
-
-### Voice Activity Detection
-
-- Silero VAD
-
-### Speaker Diarization
-
-- Pyannote Speaker Diarization
-- Pyannote Embedding
-
-### Embeddings
-
-- sentence-transformers/all-mpnet-base-v2
-
-### Text-to-Speech
-
-#### Piper
-
-Download a Piper voice model (example):
-
-```
-en_US-lessac-medium.onnx
-en_US-lessac-medium.onnx.json
-```
-
-Place both files inside the configured Piper model directory.
-
-#### MMS TTS
-
-Automatically downloaded from Hugging Face when required.
-
----
-
 # Hugging Face Authentication
 
-Either
+Either login:
 
 ```bash
 huggingface-cli login
 ```
 
-or specify
+or provide
 
 ```env
 HF_TOKEN=YOUR_TOKEN
 ```
 
-inside `.env`.
+inside the `.env` file.
 
 ---
 
@@ -230,45 +237,154 @@ Loading models and services...
 
 ---
 
+# Developer Integration
+
+The project is intentionally modular.
+
+Two major components are currently under active development by separate contributors.
+
+## 1. Memory Service
+
+Responsibilities:
+
+* Long-term conversation memory
+* Meeting memory persistence
+* Cross-session retrieval
+* Memory summarization
+* Vector indexing
+
+The service should subscribe and publish through the EventBus without modifying the existing audio pipeline.
+
+---
+
+## 2. Reasoning Service
+
+Responsibilities:
+
+* Multi-step reasoning
+* Planning
+* Tool orchestration
+* Context refinement
+* Response verification
+
+The reasoning layer should consume events after retrieval and before LLM generation.
+
+---
+
+# Event Flow
+
+```
+Microphone
+      │
+      ▼
+Voice Activity Detection
+      │
+      ▼
+Speech Recognition
+      │
+      ▼
+Transcript Created
+      │
+      ▼
+Transcript Ready
+      │
+      ▼
+Wake Word Detection
+      │
+      ▼
+Session Manager
+      │
+      ▼
+Memory Retrieval
+      │
+      ▼
+Reasoning Layer
+      │
+      ▼
+LLM
+      │
+      ▼
+Text-to-Speech
+```
+
+---
+
+# Future Development Endpoints
+
+## Memory
+
+**Status:** Under Development
+
+Responsibilities
+
+* Long-term storage
+* Meeting history
+* Semantic memory
+* Session persistence
+
+---
+
+## Reasoning
+
+**Status:** Under Development
+
+Responsibilities
+
+* Multi-step planning
+* Agent reasoning
+* Tool execution
+* Context refinement
+
+---
+
 # Testing
 
-Run individual tests:
+Run individual components:
 
 ```bash
-python test_main.py
-
 python test_pipeline.py
 
 python test_whisper.py
+
+python test_main.py
 ```
-
----
-
-# Updating
-
-```bash
-git pull origin main
-```
-
----
-
-# Current Capabilities
-
-- Real-time speech transcription
-- Meeting-aware conversation
-- Semantic retrieval from meeting history
-- Natural voice responses
-- Speaker diarization
-- Interrupt AI speech (Barge-in)
-- Conversation memory
-- Low-latency streaming
 
 ---
 
 # Notes
 
-- Keep Docker running before starting the project.
-- The first launch downloads AI models automatically.
-- GPU acceleration is strongly recommended.
-- Ensure valid API keys are available in the `.env` file.
-- Some models require acceptance of Hugging Face license terms before download.
+* Docker must be running before starting the application.
+* AI models are downloaded automatically during the first launch.
+* GPU acceleration is strongly recommended.
+* Some Hugging Face models require accepting their license before download.
+* The EventBus architecture allows independent feature development without changing the existing pipeline.
+
+---
+
+# Current Status
+
+✅ Real-time Audio Pipeline
+
+✅ EventBus Architecture
+
+✅ Wake Word Detection
+
+✅ Session Management
+
+✅ Semantic Retrieval
+
+✅ Groq Integration
+
+✅ Piper TTS
+
+✅ Barge-in Support
+
+🚧 Memory Service (In Progress)
+
+🚧 Reasoning Service (In Progress)
+
+---
+
+# License
+
+This project is intended for research and educational purposes.
