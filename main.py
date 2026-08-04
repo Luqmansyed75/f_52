@@ -65,7 +65,7 @@ def start_meeting() -> None:
     segment_queue=segment_queue,
     transcript_queue=transcript_queue,
     )
-    llm = LLMRouter()
+    llm = None
     tts = TTSRouter()
     watcher = InterruptWatcher(
     watcher_vad,
@@ -75,7 +75,9 @@ def start_meeting() -> None:
     db = Database()
     vector_store = VectorStore()
     bus = EventBus()
-    session_manager = SessionManager(timeout_seconds=10)
+    session_manager = SessionManager(timeout_seconds=config.SESSION_INACTIVITY_SECONDS, bus=bus)
+    # create llm/router after bus so it can publish lifecycle events
+    llm = LLMRouter(bus=bus)
     conversation_memory = ConversationMemory(max_turns=10)
     prompt_builder = PromptBuilder()
     session_id = db.create_session()
@@ -88,11 +90,32 @@ def start_meeting() -> None:
     event_queue: Queue[dict] = Queue()
     worker_stop = threading.Event()
 
+    from meeting.transcript_assembler import TranscriptAssembler
+
+    assembler = TranscriptAssembler(bus=bus)
+
     def handle_transcript(payload: dict) -> None:
         event_queue.put(payload)
 
+    bus.subscribe(config.SUBJECT_SPEECH_STARTED, lambda p: session_manager.refresh_activity())
+
+    bus.subscribe(config.SUBJECT_LLM_STARTED, lambda p: session_manager.refresh_activity())
+    bus.subscribe(config.SUBJECT_LLM_FINISHED, lambda p: session_manager.refresh_activity())
+
+    def _barge_in_monitor():
+        while True:
+            watcher.interrupt_event.wait()
+            try:
+                bus.publish(config.SUBJECT_BARGE_IN, {"timestamp": time.time()})
+            except Exception:
+                pass
+            session_manager.refresh_activity()
+            watcher.interrupt_event.clear()
+
+    threading.Thread(target=_barge_in_monitor, daemon=True).start()
+
     def worker() -> None:
-       def process_payload(payload: dict) -> None:
+        def process_payload(payload: dict) -> None:
             event = RawTranscriptEvent.model_validate(payload)
 
             text = event.text.strip()
@@ -103,6 +126,7 @@ def start_meeting() -> None:
             created_at = event.timestamp
             payload_session_id = event.session_id
 
+            session_manager.refresh_activity()
             mention = is_mention(text)
 
             utterance_id = db.insert_utterance(
@@ -156,15 +180,11 @@ def start_meeting() -> None:
             meeting_context = context
 
             conversation_memory.add_user(text)
-            print("\n========== MEETING CONTEXT ==========")
-            print(meeting_context if meeting_context else "<EMPTY>")
-            print("====================================\n")
             messages = prompt_builder.build(
-                            user_query=text,
-                            conversation_history=conversation_memory.get_messages(),
-                            meeting_context=meeting_context,
+                user_query=text,
+                conversation_history=conversation_memory.get_messages(),
+                meeting_context=meeting_context,
             )
-            turn_interrupted={"flag":False}
             watcher.interrupt_event.clear()
             watcher.start()
             try:
@@ -174,11 +194,12 @@ def start_meeting() -> None:
                 )
             finally:
                 watcher.stop()
+
             if turn_interrupted["flag"]:
-                print("[Barge-In] User interrupted response.")
                 app_logger.info("User interrupted assistant.")
+                session_manager.refresh_activity()
                 return
-            
+
             if response_text is None:
                 app_logger.warning("LLM stream_reply failed. Skipping response storage.")
                 return
@@ -201,20 +222,20 @@ def start_meeting() -> None:
                 ).model_dump(),
             )
 
-       while not worker_stop.is_set():
-            if session_manager.check_timeout():
-                conversation_memory.clear()
-                print("[Session] Conversation expired.")
-                app_logger.info("[Session] Conversation expired.")
+        def _on_session_expired(payload: dict) -> None:
+            conversation_memory.clear()
+            app_logger.info("[Session] Conversation expired.")
 
+        bus.subscribe(config.SUBJECT_SESSION_EXPIRED, _on_session_expired, durable="session_watcher")
+
+        while not worker_stop.is_set():
             try:
                 payload = event_queue.get(timeout=0.25)
             except Empty:
                 continue
+            process_payload(payload)
 
-            safe_execute(error_logger, process_payload, payload)
-
-    bus.subscribe(TRANSCRIPT_CREATED, handle_transcript, durable="meeting_transcript_consumer")
+    bus.subscribe(config.SUBJECT_TRANSCRIPT_READY, handle_transcript, durable="meeting_transcript_consumer")
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
 
@@ -228,8 +249,6 @@ def start_meeting() -> None:
 
     try:
         while True:
-            
-           
             try:
                 transcript = transcript_queue.get(timeout=0.25)
             except Empty:
@@ -242,8 +261,6 @@ def start_meeting() -> None:
             if not user_text:
                 continue
 
-            print(f"Transcript: {user_text}")
-
             bus.publish(
                 TRANSCRIPT_CREATED,
                 RawTranscriptEvent(
@@ -254,7 +271,6 @@ def start_meeting() -> None:
                     asr_seconds=latency,
                 ).model_dump(),
             )
-                    
 
 
     except KeyboardInterrupt:

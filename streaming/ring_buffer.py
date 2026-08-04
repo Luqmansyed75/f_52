@@ -63,11 +63,11 @@ class RingBuffer:
     def write(self, frame: bytes):
 
         with self.lock:
-
             self.buffer.append(frame)
+            consumers = tuple(self.consumers)
 
-            for consumer in list(self.consumers):
-                consumer.push(frame)
+        for consumer in consumers:
+            consumer.push(frame)
 
     def get_audio_bytes(self):
 

@@ -34,7 +34,12 @@ Future Extensions
 from __future__ import annotations
 
 import time
+import threading
 import uuid
+from typing import Optional
+
+import config
+from core.event_bus import EventBus
 
 
 class SessionManager:
@@ -60,13 +65,24 @@ class SessionManager:
          IDLE
     """
 
-    def __init__(self, timeout_seconds: int = 10):
-        self.timeout_seconds = timeout_seconds
+    def __init__(self, timeout_seconds: int = None, bus: Optional[EventBus] = None):
+        """
+        If timeout_seconds is None, use config.SESSION_INACTIVITY_SECONDS.
+        If a bus is provided, session events will be published to it.
+        """
+
+        self.timeout_seconds = (
+            timeout_seconds if timeout_seconds is not None else config.SESSION_INACTIVITY_SECONDS
+        )
 
         self._active = False
         self._session_id = None
         self._started_at = None
         self._last_activity = None
+
+        self._bus = bus
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
 
     # Session lifecycle
 
@@ -80,14 +96,16 @@ class SessionManager:
             Newly created conversation session ID.
         """
 
-        self._active = True
-
-        self._session_id = str(uuid.uuid4())
-
         now = time.time()
 
-        self._started_at = now
-        self._last_activity = now
+        with self._lock:
+            self._active = True
+            self._session_id = str(uuid.uuid4())
+            self._started_at = now
+            self._last_activity = now
+
+        # Start/reset the inactivity timer outside the lock
+        self._reset_timer()
 
         return self._session_id
 
@@ -95,12 +113,19 @@ class SessionManager:
         """
         Ends the current conversation session.
         """
+        with self._lock:
+            self._active = False
 
-        self._active = False
+            self._session_id = None
+            self._started_at = None
+            self._last_activity = None
 
-        self._session_id = None
-        self._started_at = None
-        self._last_activity = None
+            if self._timer is not None:
+                try:
+                    self._timer.cancel()
+                except Exception:
+                    pass
+                self._timer = None
 
     # Activity
 
@@ -109,9 +134,68 @@ class SessionManager:
         Call whenever the user speaks during
         an active conversation.
         """
+        # Update last_activity under lock, then reset timer and publish
+        # outside the lock to avoid holding the lock during I/O.
+        with self._lock:
+            active = self._active
+            sid = self._session_id
+            if active:
+                self._last_activity = time.time()
 
-        if self._active:
-            self._last_activity = time.time()
+        if active:
+            self._reset_timer()
+            # Publish session touched event
+            if self._bus is not None:
+                try:
+                    self._bus.publish(
+                        config.SUBJECT_SESSION_TOUCHED,
+                        {"session_id": sid, "timestamp": time.time()},
+                    )
+                except Exception:
+                    pass
+
+    # Backwards-compatible alias
+    def touch(self) -> None:
+        return self.refresh_activity()
+
+    def _reset_timer(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                try:
+                    self._timer.cancel()
+                except Exception:
+                    pass
+                self._timer = None
+
+            # Start a new timer that will expire the session
+            try:
+                self._timer = threading.Timer(self.timeout_seconds, self._expire)
+                self._timer.daemon = True
+                self._timer.start()
+            except Exception:
+                self._timer = None
+
+    def _expire(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            # Mark inactive
+            self._active = False
+            sid = self._session_id
+            self._session_id = None
+            self._started_at = None
+            self._last_activity = None
+            self._timer = None
+
+        # Publish session expired event
+        if self._bus is not None:
+            try:
+                self._bus.publish(
+                    config.SUBJECT_SESSION_EXPIRED,
+                    {"session_id": sid, "timestamp": time.time()},
+                )
+            except Exception:
+                pass
 
     # Timeout
  
@@ -130,14 +214,11 @@ class SessionManager:
             Session still active.
         """
 
+        # Polling-style timeout checks are deprecated. Sessions expire
+        # via a timer and publish an event. Keep this method for API
+        # compatibility but return False when the session is active.
         if not self._active:
             return False
-
-        elapsed = time.time() - self._last_activity
-
-        if elapsed >= self.timeout_seconds:
-            self.stop()
-            return True
 
         return False
 
@@ -175,6 +256,12 @@ class SessionManager:
         NO SESSION
             Respond only if wake word detected.
         """
+        print(
+            "Session:",
+            self._active,
+            "Mention:",
+            mention_detected,
+        )
 
         if self._active:
             self.refresh_activity()
