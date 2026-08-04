@@ -7,6 +7,9 @@ router without any other changes.
 
 from tts.tts import PiperTTS
 import time
+from core.logger import get_tts_logger
+
+logger = get_tts_logger()
 
 
 class TTSRouter:
@@ -23,6 +26,7 @@ class TTSRouter:
         print("\n------ TTS LATENCY ------")
         print(f"TTS Total       : {end-start:.3f} sec")
         print("-------------------------\n")
+        logger.info("TTS Router Total Latency: %.3f sec", end-start)
 
     def close(self):
         self.piper.close()

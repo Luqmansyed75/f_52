@@ -7,6 +7,10 @@ is generated (keeps perceived latency low).
 from groq import Groq
 import time
 import config
+from core.logger import get_llm_logger
+from core.error_handler import handle_errors
+
+logger = get_llm_logger()
 
 
 PUNCTUATION_MARKS = [". ", "? ", "! ", "\n"]
@@ -18,12 +22,12 @@ class GroqLLM:
 
     import time
 
+    @handle_errors(logger)
     def stream_reply(self, messages: list, on_sentence):
         """
         Streams the LLM response and prints detailed latency statistics.
         """
-
-
+        logger.info("Sending request to LLM (model=%s)", config.LLM_MODEL)
         request_start = time.perf_counter()
 
         response = self.client.chat.completions.create(
@@ -56,6 +60,7 @@ class GroqLLM:
                     f"⚡ First Token Latency : "
                     f"{first_token_time-request_start:.3f} sec"
                 )
+                logger.info("First Token Latency: %.3f sec", first_token_time-request_start)
                 first_token = False
 
             sentence_buffer += token
@@ -94,5 +99,8 @@ class GroqLLM:
         print(f"LLM Total Time      : {end-request_start:.3f} sec")
         print(f"Tokens Received     : {token_count}")
         print("==================================\n")
+
+        logger.info("LLM Request Sent: %.3f sec, First Token: %.3f sec, Total: %.3f sec, Tokens: %d",
+                    request_sent-request_start, first_token_time-request_start, end-request_start, token_count)
 
         return full_response

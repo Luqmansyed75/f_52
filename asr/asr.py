@@ -10,6 +10,9 @@ import torch
 import config
 from faster_whisper import WhisperModel
 from huggingface_hub import scan_cache_dir
+from core.logger import get_asr_logger
+
+logger = get_asr_logger()
 
 
 print("HF_HOME:", os.environ.get("HF_HOME"))
@@ -46,6 +49,8 @@ class WhisperASR:
         print(
             f"[ASR] Model loaded in {time.perf_counter() - start:.3f} sec"
         )
+        logger.info("Faster-Whisper model loaded in %.3f sec (device=%s, compute=%s)",
+                    time.perf_counter() - start, self.device, compute_type)
 
     def transcribe(self, audio_np) -> str:
         """
@@ -83,6 +88,9 @@ class WhisperASR:
         print(f"[ASR] Language      : {info.language}")
         print(f"[ASR] Confidence    : {info.language_probability:.3f}")
         print(f"[ASR] Latency       : {time.perf_counter()-start:.3f} sec")
+        
+        logger.info("Transcribed text (language=%s, confidence=%.3f, latency=%.3fs): %s",
+                    info.language, info.language_probability, time.perf_counter()-start, text)
 
         return text
 
@@ -115,6 +123,7 @@ def _collapse_repetition(text: str, min_repeats: int = 3) -> str:
         collapsed.append(current)
         if repeat_count >= min_repeats:
             print(f"[ASR] Collapsed {repeat_count}x repeated sentence: '{current}'")
+            logger.warning("Collapsed %dx repeated sentence: '%s'", repeat_count, current)
         i = j
 
     return " ".join(collapsed).strip()

@@ -55,7 +55,7 @@ class VectorStore:
         except Exception as e:
             print(f"[vector_store] Upsert failed (continuing without it): {e}")
 
-    def search(self, session_id: str, query_text: str, top_k: int = 5) -> list[dict]:
+    def search(self, session_id: str, query_text: str, top_k: int = 10) -> list[dict]:
         """
         Returns [] if Qdrant is unavailable or the search fails — callers
         (retrieval.py) should fall back to db.get_recent_utterances in
@@ -69,10 +69,24 @@ class VectorStore:
                 collection_name=config.QDRANT_COLLECTION_NAME,
                 query=query_vector,
                 query_filter=Filter(
-                    must=[FieldCondition(key="session_id", match=MatchValue(value=session_id))]
+                    must=[
+                        FieldCondition(
+                            key="session_id",
+                            match=MatchValue(value=session_id),
+                        )
+                    ]
                 ),
                 limit=top_k,
             ).points
+
+            print("\n========== QDRANT SEARCH ==========")
+            print("Query:", query_text)
+
+            for i, r in enumerate(results):
+                print(f"{i+1}. Score={r.score:.3f}")
+                print(r.payload["text"])
+
+            print("===================================\n")
             return [{"text": r.payload["text"], "score": r.score} for r in results]
         except Exception as e:
             print(f"[vector_store] Search failed, returning empty (caller should fall back): {e}")

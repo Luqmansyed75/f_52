@@ -89,6 +89,17 @@ SUBJECT_TRANSCRIPT_CREATED = "meeting.transcript.created"
 SUBJECT_MENTION_DETECTED = "meeting.mention.detected"
 SUBJECT_RESPONSE_GENERATED = "meeting.response.generated"
 
+# New subjects for turn assembly and session events
+SUBJECT_TRANSCRIPT_READY = "meeting.transcript.ready"
+SUBJECT_SPEECH_STARTED = "meeting.speech.started"
+SUBJECT_SPEECH_ENDED = "meeting.speech.ended"
+SUBJECT_TURN_COMPLETED = "meeting.turn.completed"
+SUBJECT_SESSION_TOUCHED = "meeting.session.touched"
+SUBJECT_SESSION_EXPIRED = "meeting.session.expired"
+SUBJECT_LLM_STARTED = "meeting.llm.started"
+SUBJECT_LLM_FINISHED = "meeting.llm.finished"
+SUBJECT_BARGE_IN = "meeting.bargein.detected"
+
 # ------------------------------------------------------------------
 # PostgreSQL
 # ------------------------------------------------------------------
@@ -116,6 +127,28 @@ FEATURES["mention_detection"] = True
 # ------------------------------------------------------------------
 # Mention detection — wake phrases (edit to taste)
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# End-of-turn / assembler tuning
+# ------------------------------------------------------------------
+# Maximum gap (seconds) between consecutive ASR segments to consider
+# them part of the same continuous user turn. If two segments are more
+# separated than this, the assembler will treat them as distinct.
+END_OF_TURN_MAX_GAP = float(os.environ.get("END_OF_TURN_MAX_GAP", 0.8))
+
+# Time to wait (seconds) after the last ASR chunk before finalising
+# a turn and emitting a ready transcript. This must be tuned to allow
+# short pauses inside a single utterance while still being responsive.
+END_OF_TURN_TIMEOUT = float(os.environ.get("END_OF_TURN_TIMEOUT", 1.2))
+
+# Session inactivity window (seconds) used by SessionManager when
+# configured for activity-based expiration. Touching the session resets
+# this timer.
+SESSION_INACTIVITY_SECONDS = int(os.environ.get("SESSION_INACTIVITY_SECONDS", 10))
+
+# When merging consecutive ASR chunks, remove duplicate outputs that
+# are identical to the last emitted ready transcript within this window.
+DUPLICATE_TRANSCRIPT_WINDOW = float(os.environ.get("DUPLICATE_TRANSCRIPT_WINDOW", 1.0))
+
 WAKE_PHRASES = [
     "hey assistant",
     "hey agent",

@@ -1,17 +1,24 @@
-torch
-transformers
-pyaudio
-numpy
-groq
-noisereduce
-langdetect
-requests
-psycopg[binary]
-qdrant-client
-sentence-transformers
-nats-py
-soundfile
-dotenv
-
-
-# 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
+accelerate==1.14.0
+bitsandbytes==0.49.2
+faster-whisper==1.2.1
+groq==1.5.0
+langdetect==1.0.9
+librosa==0.11.0
+nats-py==2.15.0
+noisereduce==3.0.3
+numpy==2.2.6
+psutil==7.2.2
+psycopg[binary]==3.3.4
+pyaudio==0.2.14
+pyannote-audio==4.0.7
+python-dotenv==1.2.2
+qdrant-client==1.18.0
+requests==2.34.2
+sentence-transformers==4.1.0
+silero-vad==6.2.1
+sounddevice==0.5.5
+soundfile==0.14.0
+# torch==2.11.0+cu128
+# torchaudio==2.11.0+cu128
+# torchvision==0.26.0+cu128
+transformers==4.57.6

@@ -1,16 +1,142 @@
 # 🎙️ Proxy Agent – AI Meeting Representative
 
-## Prerequisites
+An event-driven AI Meeting Representative that listens to meetings in real time, understands conversations, retrieves relevant meeting context, and responds naturally through speech.
 
-- Python 3.10+
-- Git
-- Docker Desktop
-- NVIDIA GPU (Recommended)
-- CUDA 12.x (Recommended)
+The system is built around a modular architecture where each capability communicates through an internal EventBus, allowing new components such as Memory and Reasoning to be added independently without modifying the core audio pipeline.
 
 ---
 
-# 1. Clone the Repository
+# Architecture
+
+```
+                 ┌──────────────────────┐
+                 │   Microphone Input   │
+                 └──────────┬───────────┘
+                            │
+                     Voice Activity Detection
+                      (Silero VAD)
+                            │
+                            ▼
+                  Faster Whisper ASR
+                            │
+                            ▼
+                  Transcript Assembler
+                            │
+                            ▼
+                    Wake Word Detection
+                            │
+                  Session Management
+                            │
+                            ▼
+                 Semantic Retrieval
+                     (Qdrant)
+                            │
+                            ▼
+                     LLM (Groq)
+                            │
+                            ▼
+                    Piper Text-to-Speech
+```
+
+The entire pipeline is coordinated through an internal **NATS JetStream EventBus**, enabling loosely coupled communication between modules.
+
+---
+
+# Current Features
+
+## Audio Pipeline
+
+* Real-time microphone streaming
+* Multi-consumer audio streaming
+* Voice Activity Detection (Silero VAD)
+* Faster Whisper Large V3 Turbo
+* Transcript assembly
+* Wake-word detection
+* Conversation session management
+* Barge-in support (interrupt AI speech)
+
+---
+
+## AI Components
+
+* Context-aware conversation
+* Semantic retrieval using Qdrant
+* Speaker diarization
+* Streaming LLM responses
+* Piper Text-to-Speech
+
+---
+
+## Infrastructure
+
+* Event-driven architecture
+* NATS JetStream EventBus
+* Docker support
+* Structured logging
+* Centralized error handling
+* Modular design for independent development
+
+---
+
+# Current Project Structure
+
+```
+audio/
+asr/
+core/
+llm/
+meeting/
+memory/
+streaming/
+tts/
+utils/
+
+main.py
+config.py
+requirements.txt
+docker-compose.yml
+```
+
+---
+
+# Technology Stack
+
+## AI Models
+
+* Faster Whisper Large V3 Turbo
+* Silero VAD
+* Pyannote Speaker Diarization
+* Pyannote Embeddings
+* sentence-transformers/all-mpnet-base-v2
+* Groq LLM
+* Piper TTS
+
+---
+
+## Infrastructure
+
+* Python 3.10+
+* Docker
+* NATS JetStream
+* Qdrant Vector Database
+* Hugging Face
+* CUDA (Recommended)
+
+---
+
+# Requirements
+
+* Python 3.10+
+* Git
+* Docker Desktop
+* NVIDIA GPU (Recommended)
+* CUDA 12.x (Recommended)
+
+---
+
+# Installation
+
+## Clone Repository
 
 ```bash
 git clone <repository_url>
@@ -20,7 +146,7 @@ cd <repository_name>
 
 ---
 
-# 2. Create Virtual Environment
+## Create Virtual Environment
 
 ### Windows
 
@@ -40,7 +166,7 @@ source test_Agent/bin/activate
 
 ---
 
-# 3. Install Python Dependencies
+## Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -48,11 +174,9 @@ pip install -r requirements.txt
 
 ---
 
-# 4. Create Environment File
+## Environment Variables
 
 Create a `.env` file in the project root.
-
-Example:
 
 ```env
 GROQ_API_KEY=YOUR_GROQ_API_KEY
@@ -61,23 +185,9 @@ HF_TOKEN=YOUR_HUGGINGFACE_TOKEN
 
 ---
 
-# 5. Install Docker
+# Docker Services
 
-Download and install Docker Desktop.
-
-Verify installation:
-
-```bash
-docker --version
-
-docker compose version
-```
-
----
-
-# 6. Start Required Services
-
-Run:
+Start the required services.
 
 ```bash
 docker compose up -d
@@ -91,71 +201,31 @@ docker ps
 
 ---
 
-# 7. Download Required Models
+# Hugging Face Authentication
 
-The following models will be downloaded automatically on first run.
-
-## Speech-to-Text
-
-- Faster Whisper Large V3 Turbo
-
-## Voice Activity Detection
-
-- Silero VAD
-
-## Speaker Diarization
-
-- Pyannote Speaker Diarization
-- Pyannote Embedding
-
-## Embedding Model
-
-- sentence-transformers/all-mpnet-base-v2
-
-## Text-to-Speech
-
-### Piper
-
-Download the required Piper voice model.
-
-Example:
-
-```
-en_US-lessac-medium.onnx
-en_US-lessac-medium.onnx.json
-```
-
-Place both files inside the project root (or the configured model directory).
-
-### MMS TTS
-
-Downloaded automatically by Hugging Face.
-
----
-
-# 8. Verify Hugging Face Login (Optional)
+Either login:
 
 ```bash
 huggingface-cli login
 ```
 
-or simply provide
+or provide
 
-```
-HF_TOKEN
+```env
+HF_TOKEN=YOUR_TOKEN
 ```
 
-inside the `.env`.
+inside the `.env` file.
 
 ---
 
-# 9. Run the Project
+# Running
 
 ```bash
 python main.py
 ```
 
-If everything is configured correctly, you should see:
+Expected output:
 
 ```
 Loading models and services...
@@ -167,42 +237,154 @@ Loading models and services...
 
 ---
 
-# Project Modules
+# Developer Integration
 
-| Module | Description |
-|---------|-------------|
-| audio | Audio capture, VAD, denoising |
-| asr | Speech-to-Text |
-| llm | LLM Routing & Prompting |
-| memory | Conversation Memory & Retrieval |
-| tts | Text-to-Speech |
-| meeting | Meeting Intelligence |
-| core | Event Bus & Session Management |
+The project is intentionally modular.
+
+Two major components are currently under active development by separate contributors.
+
+## 1. Memory Service
+
+Responsibilities:
+
+* Long-term conversation memory
+* Meeting memory persistence
+* Cross-session retrieval
+* Memory summarization
+* Vector indexing
+
+The service should subscribe and publish through the EventBus without modifying the existing audio pipeline.
 
 ---
 
-# Updating the Repository
+## 2. Reasoning Service
 
-```bash
-git pull origin main
+Responsibilities:
+
+* Multi-step reasoning
+* Planning
+* Tool orchestration
+* Context refinement
+* Response verification
+
+The reasoning layer should consume events after retrieval and before LLM generation.
+
+---
+
+# Event Flow
+
+```
+Microphone
+      │
+      ▼
+Voice Activity Detection
+      │
+      ▼
+Speech Recognition
+      │
+      ▼
+Transcript Created
+      │
+      ▼
+Transcript Ready
+      │
+      ▼
+Wake Word Detection
+      │
+      ▼
+Session Manager
+      │
+      ▼
+Memory Retrieval
+      │
+      ▼
+Reasoning Layer
+      │
+      ▼
+LLM
+      │
+      ▼
+Text-to-Speech
 ```
 
 ---
 
-# Running Tests
+# Future Development Endpoints
+
+## Memory
+
+**Status:** Under Development
+
+Responsibilities
+
+* Long-term storage
+* Meeting history
+* Semantic memory
+* Session persistence
+
+---
+
+## Reasoning
+
+**Status:** Under Development
+
+Responsibilities
+
+* Multi-step planning
+* Agent reasoning
+* Tool execution
+* Context refinement
+
+---
+
+# Testing
+
+Run individual components:
 
 ```bash
-python test_main.py
-
 python test_pipeline.py
 
 python test_whisper.py
+
+python test_main.py
 ```
 
 ---
 
 # Notes
 
-- Keep Docker running before starting the project.
-- Ensure the `.env` file contains valid API keys.
-- The first run may take several minutes while models are downloaded and cached.
+* Docker must be running before starting the application.
+* AI models are downloaded automatically during the first launch.
+* GPU acceleration is strongly recommended.
+* Some Hugging Face models require accepting their license before download.
+* The EventBus architecture allows independent feature development without changing the existing pipeline.
+
+---
+
+# Current Status
+
+✅ Real-time Audio Pipeline
+
+✅ EventBus Architecture
+
+✅ Wake Word Detection
+
+✅ Session Management
+
+✅ Semantic Retrieval
+
+✅ Groq Integration
+
+✅ Piper TTS
+
+✅ Barge-in Support
+
+🚧 Memory Service (In Progress)
+
+🚧 Reasoning Service (In Progress)
+
+---
+
+# License
+
+This project is intended for research and educational purposes.

@@ -17,9 +17,13 @@ import threading
 from typing import Callable
 
 import nats
-from nats.js.api import StreamConfig
+from nats.js.api import ConsumerConfig, DeliverPolicy, AckPolicy,StreamConfig
 
 import config
+from core.logger import get_events_logger
+from core.error_handler import safe_execute
+
+logger = get_events_logger()
 
 
 # Subject constants — import these rather than hardcoding subject
@@ -51,31 +55,68 @@ class EventBus:
         self._nc = await nats.connect(config.NATS_URL)
         self._js = self._nc.jetstream()
 
+        subjects = [
+            TRANSCRIPT_CREATED,
+            MENTION_DETECTED,
+            RESPONSE_GENERATED,
+            # additional subjects from config
+            config.SUBJECT_TRANSCRIPT_READY,
+            config.SUBJECT_SPEECH_STARTED,
+            config.SUBJECT_SPEECH_ENDED,
+            config.SUBJECT_TURN_COMPLETED,
+            config.SUBJECT_SESSION_TOUCHED,
+            config.SUBJECT_SESSION_EXPIRED,
+            config.SUBJECT_LLM_STARTED,
+            config.SUBJECT_LLM_FINISHED,
+            config.SUBJECT_BARGE_IN,
+        ]
+
         try:
             await self._js.add_stream(
                 StreamConfig(
                     name=config.NATS_STREAM_NAME,
-                    subjects=[
-                        TRANSCRIPT_CREATED,
-                        MENTION_DETECTED,
-                        RESPONSE_GENERATED,
-                    ],
+                    subjects=subjects,
                 )
             )
         except Exception:
-            # Stream likely already exists — fine, idempotent setup.
-            pass
+            # Stream likely already exists. Try updating it to include
+            # any newly-introduced subjects so publishes to those
+            # subjects will be accepted by JetStream.
+            try:
+                await self._js.update_stream(
+                    StreamConfig(name=config.NATS_STREAM_NAME, subjects=subjects)
+                )
+            except Exception:
+                # If update also fails, give up silently — publish()
+                # will log detailed errors later.
+                pass
 
     def publish(self, subject: str, payload: dict) -> None:
         """Synchronously publish a JSON-serializable payload to a subject."""
+        logger.debug("Publishing to '%s'", subject)
         data = json.dumps(payload).encode("utf-8")
-        future = asyncio.run_coroutine_threadsafe(
-            self._js.publish(subject, data), self._loop
-        )
+
+        async def _publish_once():
+            return await self._js.publish(subject, data)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is self._loop:
+            self._loop.create_task(_publish_once())
+            return
+
+        future = asyncio.run_coroutine_threadsafe(_publish_once(), self._loop)
         try:
             future.result(timeout=5)
         except Exception as e:
-            print(f"[event_bus] Publish failed for '{subject}': {e}")
+            logger.error("Publish failed for '%s': %s", subject, e, exc_info=True)
+            try:
+                logger.debug("Local fallback event for '%s': %s", subject, payload)
+            except Exception:
+                pass
 
     def subscribe(self, subject: str, handler: Callable[[dict], None], durable: str = None) -> None:
         """
@@ -85,22 +126,40 @@ class EventBus:
         handlers fast or dispatch to your own worker thread if needed).
         """
         durable = durable or subject.replace(".", "_")
+        logger.info("Subscribing to '%s' (durable: %s)", subject, durable)
 
         async def _consume():
-            psub = await self._js.pull_subscribe(subject, durable=durable)
+            consumer_config = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.NEW,
+                ack_policy='Explicit',
+            )
+            try:
+                psub = await self._js.pull_subscribe(
+                    subject,
+                    durable=durable,
+                    config=consumer_config,
+                )
+            except Exception as e:
+                logger.error("Pull subscribe failed for '%s': %s", subject, e, exc_info=True)
+                raise
+
             while True:
                 try:
                     msgs = await psub.fetch(1, timeout=5)
                 except Exception:
                     continue
+
                 for msg in msgs:
                     try:
                         payload = json.loads(msg.data.decode("utf-8"))
-                        handler(payload)
-                        await msg.ack()
-                    except Exception as e:
-                        print(f"[event_bus] Handler error on '{subject}': {e}")
 
+                        safe_execute(logger, handler, payload)
+
+                        await msg.ack()
+
+                    except Exception:
+                        logger.error("Handler error on '%s'", subject, exc_info=True)
         asyncio.run_coroutine_threadsafe(_consume(), self._loop)
 
     def close(self):
@@ -114,11 +173,10 @@ class EventBus:
 
 
 if __name__ == "__main__":
-    # Quick smoke test: publish then consume one message.
     bus = EventBus()
 
     def on_msg(payload):
-        print("[smoke test] Received:", payload)
+        logger.debug("[smoke test] Received: %s", payload)
 
     bus.subscribe(TRANSCRIPT_CREATED, on_msg, durable="smoke_test")
     bus.publish(TRANSCRIPT_CREATED, {"text": "hello world", "session_id": "test"})

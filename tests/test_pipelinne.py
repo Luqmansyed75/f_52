@@ -17,7 +17,7 @@ import config
 
 from audio.audio_io import MicListener
 from audio.vad import SileroVAD
-from asr.asr import QwenASR
+from asr.asr import WhisperASR
 from llm.llm import GroqLLM
 from tts.tts_router import TTSRouter
 
@@ -63,7 +63,7 @@ print("Loading models...")
 vad = SileroVAD()
 mic = MicListener(vad)
 
-asr = QwenASR()
+asr = WhisperASR()
 
 llm = GroqLLM()
 
