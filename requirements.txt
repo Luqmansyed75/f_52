@@ -10,3 +10,8 @@ psycopg[binary]
 qdrant-client
 sentence-transformers
 nats-py
+soundfile
+dotenv
+
+
+# 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

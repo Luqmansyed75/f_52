@@ -18,13 +18,13 @@ if not GROQ_API_KEY:
 
 # PATHS
 
-BASE_DIR = r"C:\Users\Akhil\Desktop\Voice Agent Test"
-PIPER_EXE = os.path.join(BASE_DIR, "piper", "piper.exe")
-PIPER_MODEL_PATH = os.path.join(BASE_DIR, "assets/en_US-lessac-medium.onnx")
-TEMP_WAV_PATH = os.path.join(BASE_DIR, "assets/temp_audio.wav")
+PIPER_EXE = r"C:\Users\ashok\OneDrive\Documents\GMeet-proxy\f_52\piper\piper.exe"
 
+PIPER_MODEL_PATH = r"C:\Users\ashok\OneDrive\Documents\GMeet-proxy\f_52\models\en_US-lessac-medium.onnx"
+
+TEMP_WAV_PATH = r"C:\Users\ashok\OneDrive\Documents\GMeet-proxy\f_52\temp.wav"
 # Hugging Face network validation
-os.environ["HF_HUB_OFFLINE"] = "1"
+# os.environ["HF_HUB_OFFLINE"] = "1"
 
 # # if you point this elsewhere)
 # os.environ.setdefault("HF_HOME", "C:/hf_cache")
@@ -124,3 +124,7 @@ WAKE_PHRASES = [
     "hey proxy",
     "hi akhil",
 ]
+
+# Hugging face token for pyannote diarization model
+# Add this to your existing config.py
+HF_TOKEN = "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"

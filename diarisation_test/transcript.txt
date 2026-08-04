@@ -1,0 +1,39 @@
+[0.89s - 1.03s] SPEAKER_02:
+  [too short]
+
+[1.03s - 2.22s] SPEAKER_01:
+  Anand, how are you?
+
+[1.28s - 1.38s] SPEAKER_02:
+  [too short]
+
+[2.78s - 4.55s] SPEAKER_02:
+  and find a shelf over to you.
+
+[5.41s - 7.52s] SPEAKER_02:
+  Okay, I think Vinky and Chaita are
+
+[7.51s - 11.27s] SPEAKER_01:
+  very very best friends what about what are you thinking about
+
+[11.39s - 11.42s] SPEAKER_02:
+  [too short]
+
+[11.42s - 15.78s] SPEAKER_00:
+  I think you and Vani are lovers. I don't know about them.
+
+[16.64s - 18.36s] SPEAKER_00:
+  Yeah, they are not only lovely.
+
+[18.36s - 18.59s] SPEAKER_02:
+  [too short]
+
+[18.59s - 19.02s] SPEAKER_00:
+  Maddie.
+
+[20.15s - 22.09s] SPEAKER_02:
+  again and stop okay no
+
+[22.09s - 22.96s] SPEAKER_00:
+  Don't stop.
+
