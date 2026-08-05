@@ -97,7 +97,7 @@ class SessionManager:
         """
 
         now = time.time()
-
+        print("SESSION STARTED")
         with self._lock:
             self._active = True
             self._session_id = str(uuid.uuid4())
@@ -119,6 +119,7 @@ class SessionManager:
             self._session_id = None
             self._started_at = None
             self._last_activity = None
+            print("SESSION STOPPED")
 
             if self._timer is not None:
                 try:
@@ -136,8 +137,9 @@ class SessionManager:
         """
         # Update last_activity under lock, then reset timer and publish
         # outside the lock to avoid holding the lock during I/O.
+        print("SESSION REFRESH")
         with self._lock:
-            active = self._active
+            active = self._active   
             sid = self._session_id
             if active:
                 self._last_activity = time.time()
@@ -176,6 +178,7 @@ class SessionManager:
                 self._timer = None
 
     def _expire(self) -> None:
+        print("SESSION EXPIRED")
         with self._lock:
             if not self._active:
                 return

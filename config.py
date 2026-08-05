@@ -133,17 +133,17 @@ FEATURES["mention_detection"] = True
 # Maximum gap (seconds) between consecutive ASR segments to consider
 # them part of the same continuous user turn. If two segments are more
 # separated than this, the assembler will treat them as distinct.
-END_OF_TURN_MAX_GAP = float(os.environ.get("END_OF_TURN_MAX_GAP", 0.8))
+END_OF_TURN_MAX_GAP = float(os.environ.get("END_OF_TURN_MAX_GAP", 1.0))
 
 # Time to wait (seconds) after the last ASR chunk before finalising
 # a turn and emitting a ready transcript. This must be tuned to allow
 # short pauses inside a single utterance while still being responsive.
-END_OF_TURN_TIMEOUT = float(os.environ.get("END_OF_TURN_TIMEOUT", 1.2))
+END_OF_TURN_TIMEOUT = float(os.environ.get("END_OF_TURN_TIMEOUT", 1.5))
 
 # Session inactivity window (seconds) used by SessionManager when
 # configured for activity-based expiration. Touching the session resets
 # this timer.
-SESSION_INACTIVITY_SECONDS = int(os.environ.get("SESSION_INACTIVITY_SECONDS", 10))
+SESSION_INACTIVITY_SECONDS = int(os.environ.get("SESSION_INACTIVITY_SECONDS", 20))
 
 # When merging consecutive ASR chunks, remove duplicate outputs that
 # are identical to the last emitted ready transcript within this window.
