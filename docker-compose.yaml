@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: f52_postgres
+    environment:
+      POSTGRES_USER: f52
+      POSTGRES_PASSWORD: f52pass
+      POSTGRES_DB: f52_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

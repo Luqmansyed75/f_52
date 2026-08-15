@@ -1,0 +1,19 @@
+# Vector store
+chromadb>=0.5
+
+# Embeddings
+sentence-transformers>=3.0
+
+# LangChain
+langchain>=0.3
+langchain-core>=0.3
+langchain-text-splitters>=0.3
+langchain-groq>=0.3
+pydantic>=2.0
+
+# Database (async)
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.29
+
+# Env
+python-dotenv>=1.0
