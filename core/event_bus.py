@@ -132,7 +132,7 @@ class EventBus:
             consumer_config = ConsumerConfig(
                 durable_name=durable,
                 deliver_policy=DeliverPolicy.NEW,
-                ack_policy='Explicit',
+                ack_policy=AckPolicy.EXPLICIT,
             )
             try:
                 psub = await self._js.pull_subscribe(
