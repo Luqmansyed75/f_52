@@ -25,7 +25,7 @@ import websockets
 logger = logging.getLogger("websocket_source")
 
 # Must match MicListener chunk size so Segmenter/VAD see identical frame sizes
-MIC_CHUNK_BYTES = 512
+MIC_CHUNK_BYTES = 1024
 
 # meet-container sends 640-byte PCM frames (20ms @ 16kHz mono int16)
 WS_FRAME_PCM_BYTES = 640

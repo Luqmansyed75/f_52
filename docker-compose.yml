@@ -78,6 +78,7 @@ services:
       - NATS_URL=nats://nats:4222
     volumes:
       - hf_cache:/root/.cache/huggingface
+      - ./audio:/app/audio
 
 volumes:
   postgres_data:
