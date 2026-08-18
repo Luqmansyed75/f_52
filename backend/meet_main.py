@@ -211,7 +211,6 @@ def start_meeting() -> None:
     )
 
     tts = TTSRouter()
-    ws_tts_sink = WebSocketTTSSink(ws_source)
 
     watcher = InterruptWatcher(watcher_vad, ring_buffer)
 
@@ -310,13 +309,10 @@ def start_meeting() -> None:
                 # Signal meet-container: bot is now SPEAKING
                 ws_source.set_speaking(True)
 
-                # Speak via TTS (local piper → pcm)
-                # TTSRouter.speak() synthesises and plays locally in mic mode.
-                # In meet mode we need PCM bytes → WebSocket.
-                # For now: speak locally to get the pipeline working,
-                # then wire ws_tts_sink in Phase 3 polish.
-                tts.speak(
+                # Send TTS audio over WebSocket → meet-container → bot_in → Chrome mic
+                tts.piper.speak_to_websocket(
                     sentence,
+                    ws_source=ws_source,
                     interrupt_event=watcher.interrupt_event,
                 )
 
@@ -405,7 +401,7 @@ def start_meeting() -> None:
 
     # --- Start audio pipeline ---
     ws_source.start_stream()
-    ws_tts_sink.start()
+
     segmenter.start_segmenter()
     asr_worker.start_worker()
 
@@ -445,7 +441,6 @@ def start_meeting() -> None:
         asr_worker.stop_worker()
         segmenter.stop_segmenter()
         ws_source.stop_stream()
-        ws_tts_sink.stop()
         watcher.stop()
         tts.close()
         leave_meeting()

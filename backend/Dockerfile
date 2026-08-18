@@ -13,22 +13,48 @@ RUN apt-get update && apt-get install -y \
     libsndfile1 \
     ffmpeg \
     curl \
+    wget \
+    unzip \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps
 COPY backend/requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
-# Copy entire project into container
-# meet_main.py imports from asr/, audio/, core/, etc.
-# so the whole repo root needs to be at /app
+# Install torch separately first — largest download, cache it in its own layer
+RUN pip3 install --no-cache-dir --break-system-packages \
+    --timeout 300 --retries 5 \
+    torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0
+
+# Install everything else
+RUN pip3 install --no-cache-dir --break-system-packages \
+    --timeout 300 --retries 5 \
+    -r requirements.txt
+
+# Download Linux Piper binary
+RUN mkdir -p /app/piper && \
+    wget -q --tries=5 --timeout=60 -O /tmp/piper.tar.gz \
+    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" && \
+    tar -xzf /tmp/piper.tar.gz -C /app/piper --strip-components=1 && \
+    rm /tmp/piper.tar.gz && \
+    chmod +x /app/piper/piper && \
+    echo "Piper binary installed:" && \
+    ls -lh /app/piper/piper
+
+# Download Piper voice model
+RUN mkdir -p /app/assets && \
+    wget -q --tries=5 --timeout=120 \
+    -O /app/assets/en_US-lessac-medium.onnx \
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" && \
+    wget -q --tries=5 --timeout=60 \
+    -O /app/assets/en_US-lessac-medium.onnx.json \
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" && \
+    echo "Piper model installed:" && \
+    ls -lh /app/assets/
+
+# Copy project files
 COPY . /app
-
-# Piper binary and model (mounted at runtime via docker-compose volume)
-# so we don't bake them into the image
 
 ENV PYTHONPATH=/app
 

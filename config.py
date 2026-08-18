@@ -16,15 +16,29 @@ if not GROQ_API_KEY:
     )
 
 
-# PATHS
 
-BASE_DIR = r"C:\Users\Akhil\Desktop\Voice Agent Test"
-PIPER_EXE = os.path.join(BASE_DIR, "piper", "piper.exe")
-PIPER_MODEL_PATH = os.path.join(BASE_DIR, "assets/en_US-lessac-medium.onnx")
-TEMP_WAV_PATH = os.path.join(BASE_DIR, "assets/temp_audio.wav")
+# Paths — env vars override for Docker/Linux, Windows defaults for local mode
+import platform
+
+if platform.system() == "Windows":
+    BASE_DIR = r"C:\Users\Akhil\Desktop\Voice Agent Test"
+    _DEFAULT_PIPER_EXE        = os.path.join(BASE_DIR, "piper", "piper.exe")
+    _DEFAULT_PIPER_MODEL_PATH = os.path.join(BASE_DIR, "assets", "en_US-lessac-medium.onnx")
+    _DEFAULT_TEMP_WAV_PATH    = os.path.join(BASE_DIR, "assets", "temp_audio.wav")
+else:
+    # Linux container — paths set via env vars or Docker volume mounts
+    BASE_DIR = "/app"
+    _DEFAULT_PIPER_EXE        = "/app/piper/piper"
+    _DEFAULT_PIPER_MODEL_PATH = "/app/assets/en_US-lessac-medium.onnx"
+    _DEFAULT_TEMP_WAV_PATH    = "/tmp/temp_audio.wav"
+
+PIPER_EXE        = os.environ.get("PIPER_EXE",        _DEFAULT_PIPER_EXE)
+PIPER_MODEL_PATH = os.environ.get("PIPER_MODEL_PATH",  _DEFAULT_PIPER_MODEL_PATH)
+TEMP_WAV_PATH    = os.environ.get("TEMP_WAV_PATH",     _DEFAULT_TEMP_WAV_PATH)
 
 # Hugging Face network validation
-os.environ["HF_HUB_OFFLINE"] = "1"
+if os.environ.get("ALLOW_HF_DOWNLOAD", "0") != "1":
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
 # # if you point this elsewhere)
 # os.environ.setdefault("HF_HOME", "C:/hf_cache")

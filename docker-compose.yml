@@ -43,6 +43,44 @@ services:
       - "4222:4222"
       - "8222:8222"
 
+  meet-container:
+    image: meet-service:latest
+    container_name: meet-container
+    restart: unless-stopped
+    shm_size: "2gb"
+    ports:
+      - "5001:5001"
+    environment:
+      - BOT_DISPLAY_NAME=${BOT_DISPLAY_NAME:-AI Assistant}
+      - MEET_SERVICE_PORT=5001
+    volumes:
+      - chrome_profile:/chrome-profile
+
+  backend:
+    image: meet-backend:latest
+    container_name: backend
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - qdrant
+      - nats
+      - redis
+      - meet-container
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ALLOW_HF_DOWNLOAD=1
+      - MEET_SERVICE_URL=http://meet-container:5001
+      - MEET_SERVICE_WS=ws://meet-container:5001/audio
+      - MEET_URL=${MEET_URL}
+      - BOT_DISPLAY_NAME=${BOT_DISPLAY_NAME:-AI Assistant}
+      - POSTGRES_DSN=postgresql://voiceagent:password@postgres:5432/meetings
+      - QDRANT_URL=http://qdrant:6333
+      - NATS_URL=nats://nats:4222
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+
 volumes:
   postgres_data:
   qdrant_data:
+  hf_cache:
+  chrome_profile:
