@@ -1,0 +1,30 @@
+# Phase 0.5 production-aligned topology
+#
+# listen path:
+#   Chrome speaker output -> meet_out -> capture from meet_out.monitor
+#
+# speak path:
+#   bot audio injected into bot_in -> bot_in.monitor -> meet_mic
+#   Chrome microphone is pinned to meet_mic
+
+load-module module-null-sink \
+    sink_name=meet_out \
+    sink_properties=device.description=meet_out \
+    format=s16le \
+    rate=48000 \
+    channels=2
+
+load-module module-null-sink \
+    sink_name=bot_in \
+    sink_properties=device.description=bot_in \
+    format=s16le \
+    rate=48000 \
+    channels=2
+
+load-module module-virtual-source \
+    source_name=meet_mic \
+    master=bot_in.monitor \
+    source_properties=device.description=meet_mic
+
+set-default-sink meet_out
+set-default-source meet_mic

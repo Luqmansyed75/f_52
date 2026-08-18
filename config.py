@@ -106,7 +106,7 @@ SUBJECT_BARGE_IN = "meeting.bargein.detected"
 
 POSTGRES_DSN = os.environ.get(
     "POSTGRES_DSN",
-    "postgresql://voiceagent:password@localhost:5432/meetings",
+    "postgresql://voiceagent:password@localhost:5433/meetings",
 )
 
 
