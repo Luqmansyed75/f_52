@@ -28,6 +28,8 @@ test_Agent/
 .DS_Store
 Thumbs.db
 desktop.ini
+google_cookies.json
+*.png
 
 # ======================================
 # Logs

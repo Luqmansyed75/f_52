@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   postgres:
@@ -44,6 +42,9 @@ services:
       - "8222:8222"
 
   meet-container:
+    build:
+      context: ./meet-container
+      dockerfile: Dockerfile
     image: meet-service:latest
     container_name: meet-container
     restart: unless-stopped
@@ -57,6 +58,9 @@ services:
       - chrome_profile:/chrome-profile
 
   backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     image: meet-backend:latest
     container_name: backend
     restart: unless-stopped
@@ -68,6 +72,8 @@ services:
       - meet-container
     environment:
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_API_KEYS=${GROQ_API_KEYS}
+      - ASR_BACKEND=${ASR_BACKEND:-groq}
       - ALLOW_HF_DOWNLOAD=1
       - MEET_SERVICE_URL=http://meet-container:5001
       - MEET_SERVICE_WS=ws://meet-container:5001/audio
@@ -79,6 +85,54 @@ services:
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./audio:/app/audio
+      - ./asr:/app/asr
+      - ./backend:/app/backend
+      - ./tts:/app/tts
+      - ./streaming:/app/streaming
+      - ./meeting:/app/meeting
+      - ./memory:/app/memory
+      - ./llm:/app/llm
+      - ./core:/app/core
+      - ./config.py:/app/config.py
+      
+  login-helper:
+    build:
+      context: ./meet-container
+      dockerfile: Dockerfile
+    image: meet-service:latest
+    container_name: login-helper
+    profiles:
+      - login
+    shm_size: "2gb"
+    ports:
+      - "6080:6080"
+    volumes:
+      - chrome_profile:/chrome-profile
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        rm -f /chrome-profile/Singleton* /tmp/.X99-lock /tmp/.X11-unix/X99
+        Xvfb :99 -screen 0 1280x800x24 -ac &
+        export DISPLAY=:99
+        sleep 1
+        fluxbox &
+        sleep 1
+        x11vnc -display :99 -nopw -listen 127.0.0.1 -xkb -forever -shared -bg
+        websockify --web /usr/share/novnc 0.0.0.0:6080 127.0.0.1:5900 &
+        sleep 1
+        echo "=========================================================="
+        echo "  LOGIN DESKTOP IS LIVE!"
+        echo "  Open on Windows: http://localhost:6080/vnc.html"
+        echo "=========================================================="
+        exec google-chrome-stable \
+          --no-sandbox \
+          --disable-dev-shm-usage \
+          --disable-gpu \
+          --user-data-dir=/chrome-profile \
+          --no-first-run \
+          --disable-default-apps \
+          "https://accounts.google.com/signin"
 
 volumes:
   postgres_data:

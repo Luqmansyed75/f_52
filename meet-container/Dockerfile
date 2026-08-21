@@ -3,16 +3,17 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 
-# System deps + Playwright browser deps (manually specified for Ubuntu 24.04)
+# System deps + Playwright browser deps + VNC desktop deps
 RUN apt-get update && apt-get install -y \
-    # Display
     xvfb \
     x11-utils \
-    # Audio
+    x11vnc \
+    novnc \
+    websockify \
+    fluxbox \
     pulseaudio \
     pulseaudio-utils \
     alsa-utils \
-    # Chrome deps
     wget \
     gnupg \
     ca-certificates \
@@ -34,12 +35,10 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
-    # Playwright chromium extra deps
     libx11-6 \
     libx11-xcb1 \
     libxcb1 \
     libxext6 \
-    libxfixes3 \
     libxi6 \
     libxrender1 \
     libxss1 \
@@ -48,11 +47,9 @@ RUN apt-get update && apt-get install -y \
     libpangocairo-1.0-0 \
     libcairo2 \
     libgdk-pixbuf-2.0-0 \
-    # Python
     python3 \
     python3-pip \
     python3-venv \
-    # Utilities
     curl \
     procps \
     && rm -rf /var/lib/apt/lists/*
@@ -63,16 +60,20 @@ RUN wget -q -O /tmp/chrome.deb \
     && apt-get install -y /tmp/chrome.deb \
     && rm /tmp/chrome.deb
 
-# Python env
+# Python virtual environment (fixes Debian package conflicts completely)
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
 WORKDIR /app
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
-
-# Install Playwright chromium — skip --with-deps (we installed manually above)
+RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
 
 COPY . .
 
-RUN chmod +x entrypoint.sh
+RUN chmod +x entrypoint.sh 2>/dev/null || true
+
+EXPOSE 5001 6080
 
 ENTRYPOINT ["./entrypoint.sh"]

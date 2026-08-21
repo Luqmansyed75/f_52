@@ -17,6 +17,7 @@ import asyncio
 import logging
 import struct
 import time
+from typing import Callable, Optional
 
 logger = logging.getLogger("audio_bridge")
 
@@ -33,15 +34,15 @@ class AudioBridge:
         self,
         capture_device: str = CAPTURE_DEVICE,
         playback_device: str = PLAYBACK_DEVICE,
-        ws_sender=None,
+        ws_sender: Optional[Callable] = None,
     ):
         self.capture_device = capture_device
         self.playback_device = playback_device
         self.ws_sender = ws_sender  # async callable: (bytes) -> None
 
-        self._capture_proc: asyncio.subprocess.Process | None = None
-        self._playback_proc: asyncio.subprocess.Process | None = None
-        self._capture_task: asyncio.Task | None = None
+        self._capture_proc: Optional[asyncio.subprocess.Process] = None
+        self._playback_proc: Optional[asyncio.subprocess.Process] = None
+        self._capture_task: Optional[asyncio.Task] = None
         self._seq: int = 0
         self._speaking: bool = False
         self._running: bool = False
@@ -156,6 +157,7 @@ class AudioBridge:
         logger.info(f"parecord started. pid={self._capture_proc.pid}")
 
     async def _start_playback_proc(self) -> None:
+        # Buffer latency set to 100ms to eliminate underruns/crackling
         self._playback_proc = await asyncio.create_subprocess_exec(
             "pacat",
             f"--device={self.playback_device}",
@@ -163,7 +165,7 @@ class AudioBridge:
             f"--format={FORMAT}",
             f"--rate={RATE}",
             f"--channels={CHANNELS}",
-            "--latency-msec=20",
+            "--latency-msec=100",
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -177,7 +179,7 @@ class AudioBridge:
 
     async def _stop_proc(
         self,
-        proc: asyncio.subprocess.Process | None,
+        proc: Optional[asyncio.subprocess.Process],
         name: str,
     ) -> None:
         if proc is None:

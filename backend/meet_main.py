@@ -16,6 +16,7 @@ import struct
 import threading
 import time
 import urllib.request
+import urllib.error
 from queue import Empty, Queue
 
 import config
@@ -54,6 +55,19 @@ MEET_SERVICE_URL = os.environ.get("MEET_SERVICE_URL", "http://meet-container:500
 MEET_SERVICE_WS  = os.environ.get("MEET_SERVICE_WS",  "ws://meet-container:5001/audio")
 MEET_URL         = os.environ.get("MEET_URL", "")
 
+EXIT_PHRASES = [
+    "leave the meeting",
+    "leave the call",
+    "leave meeting",
+    "leave now",
+    "exit the meeting",
+    "exit the call",
+    "you can leave",
+    "bye bye",
+    "goodbye",
+    "hang up",
+    "disconnect",
+]
 
 # ---------------------------------------------------------------------------
 # Meet-container HTTP helpers
@@ -75,17 +89,23 @@ def _http_post(path: str, body: dict) -> dict:
 def join_meeting(meet_url: str) -> str:
     """Tell meet-container to join the meeting. Returns session_id."""
     logger.info(f"Joining meeting: {meet_url}")
-    result = _http_post("/join", {"meet_url": meet_url})
-    session_id = result.get("session_id", "")
-    logger.info(f"Joined. session_id={session_id} lifecycle={result.get('lifecycle')}")
-    return session_id
+    try:
+        result = _http_post("/join", {"meet_url": meet_url})
+        session_id = result.get("session_id", "")
+        logger.info(f"Joined. session_id={session_id} lifecycle={result.get('lifecycle')}")
+        return session_id
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            logger.info("Bot is already in the meeting room (409 Conflict). Continuing...")
+            return "reused"
+        raise
 
 
 def leave_meeting() -> None:
     """Tell meet-container to leave the meeting."""
     try:
         _http_post("/leave", {})
-        logger.info("Left meeting.")
+        logger.info("🚪 Left meeting successfully.")
     except Exception as e:
         logger.warning(f"leave_meeting failed: {e}")
 
@@ -95,14 +115,6 @@ def leave_meeting() -> None:
 # ---------------------------------------------------------------------------
 
 class WebSocketTTSSink:
-    """
-    Wraps TTSRouter to intercept PCM output and send it over WebSocket
-    to meet-container instead of playing locally.
-
-    meet_main passes this to TTSRouter via monkey-patch or subclass.
-    Simpler approach: wrap at the speak() call site.
-    """
-
     def __init__(self, ws_source: WebSocketSource):
         self._ws_source = ws_source
         self._seq = 0
@@ -123,12 +135,11 @@ class WebSocketTTSSink:
 
     def stop(self) -> None:
         self._running = False
-        self._queue.put(None)  # sentinel
+        self._queue.put(None)
         if self._thread:
             self._thread.join(timeout=5)
 
     def send_pcm(self, pcm_bytes: bytes) -> None:
-        """Called from TTS thread. Queues PCM for async send."""
         self._queue.put(pcm_bytes)
 
     def _run_loop(self) -> None:
@@ -180,7 +191,6 @@ def start_meeting() -> None:
     watcher_vad = SileroVAD()
     ring_buffer = RingBuffer()
 
-    # --- WebSocket audio source (replaces MicListener) ---
     meeting_ended_event = threading.Event()
 
     def on_session_started(session_id: str) -> None:
@@ -211,7 +221,6 @@ def start_meeting() -> None:
     )
 
     tts = TTSRouter()
-
     watcher = InterruptWatcher(watcher_vad, ring_buffer)
 
     db = Database()
@@ -279,7 +288,11 @@ def start_meeting() -> None:
             except Exception as exc:
                 logger.error(f"Vector store write failed: {exc}", exc_info=True)
 
-            if not session_manager.should_respond(mention):
+            # Check for user exit intent
+            text_lower = text.lower()
+            is_exit_command = any(phrase in text_lower for phrase in EXIT_PHRASES)
+
+            if not session_manager.should_respond(mention) and not is_exit_command:
                 return
 
             bus.publish(
@@ -309,7 +322,7 @@ def start_meeting() -> None:
                 # Signal meet-container: bot is now SPEAKING
                 ws_source.set_speaking(True)
 
-                # Send TTS audio over WebSocket → meet-container → bot_in → Chrome mic
+                # Send TTS audio over WebSocket
                 tts.piper.speak_to_websocket(
                     sentence,
                     ws_source=ws_source,
@@ -336,7 +349,6 @@ def start_meeting() -> None:
                 )
             finally:
                 watcher.stop()
-                # Signal meet-container: bot is done SPEAKING
                 ws_source.set_speaking(False)
 
             if turn_interrupted["flag"]:
@@ -364,6 +376,13 @@ def start_meeting() -> None:
                     timestamp=time.time(),
                 ).model_dump(),
             )
+
+            # If user requested exit or LLM said goodbye, execute meeting leave
+            if is_exit_command or any(w in response_text.lower() for w in ["leaving the meeting", "goodbye", "bye!"]):
+                logger.info("🔴 Exit triggered. Waiting 2.0s for TTS audio playback to complete...")
+                time.sleep(2.0)
+                leave_meeting()
+                meeting_ended_event.set()
 
         def _on_session_expired(payload: dict) -> None:
             conversation_memory.clear()
