@@ -9,8 +9,9 @@ Capture path (meeting → backend):
     Suppressed when bot is SPEAKING (echo gate)
 
 Playback path (backend → meeting):
-    receive PCM bytes via play(pcm)
-      → write into bot_in via pacat
+    receive binary frames over WebSocket
+      → strip 4-byte sequence header
+      → write clean PCM into bot_in via pacat
 """
 
 import asyncio
@@ -31,6 +32,7 @@ PLAYBACK_DEVICE = "bot_in"
 
 class AudioBridge:
     def __init__(
+
         self,
         capture_device: str = CAPTURE_DEVICE,
         playback_device: str = PLAYBACK_DEVICE,
@@ -38,7 +40,7 @@ class AudioBridge:
     ):
         self.capture_device = capture_device
         self.playback_device = playback_device
-        self.ws_sender = ws_sender  # async callable: (bytes) -> None
+        self.ws_sender = ws_sender
 
         self._capture_proc: Optional[asyncio.subprocess.Process] = None
         self._playback_proc: Optional[asyncio.subprocess.Process] = None
@@ -47,19 +49,13 @@ class AudioBridge:
         self._speaking: bool = False
         self._running: bool = False
 
-        # Stats
         self._frames_sent: int = 0
         self._frames_suppressed: int = 0
         self._frames_played: int = 0
         self._start_time: float = 0.0
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     async def start(self) -> None:
         if self._running:
-            logger.warning("AudioBridge.start() called while already running.")
             return
 
         self._running = True
@@ -72,10 +68,7 @@ class AudioBridge:
         await self._start_playback_proc()
         await self._start_capture_proc()
         self._capture_task = asyncio.create_task(self._capture_loop())
-        logger.info(
-            f"AudioBridge started. "
-            f"capture={self.capture_device} playback={self.playback_device}"
-        )
+        logger.info(f"AudioBridge started. capture={self.capture_device} playback={self.playback_device}")
 
     async def stop(self) -> None:
         if not self._running:
@@ -98,50 +91,33 @@ class AudioBridge:
         self._playback_proc = None
 
         elapsed = time.monotonic() - self._start_time
-        logger.info(
-            f"AudioBridge stopped after {elapsed:.1f}s. "
-            f"sent={self._frames_sent} "
-            f"suppressed={self._frames_suppressed} "
-            f"played={self._frames_played}"
-        )
+        logger.info(f"AudioBridge stopped after {elapsed:.1f}s. sent={self._frames_sent} played={self._frames_played}")
 
     def set_speaking(self, speaking: bool) -> None:
         if speaking != self._speaking:
             logger.info(f"Echo gate: speaking={speaking}")
         self._speaking = speaking
 
-    async def play(self, pcm: bytes) -> None:
-        """Write raw PCM from backend into playback process stdin."""
+    async def play(self, data: bytes) -> None:
+        """Write raw PCM from backend into playback process stdin, stripping sequence header if present."""
         if not self._running:
             return
+
         proc = self._playback_proc
         if proc is None or proc.stdin is None:
-            logger.warning("play() called but playback proc not ready.")
             return
+
+        # Strip 4-byte big-endian sequence header if present (header + 640-byte frame = 644 bytes)
+        pcm = data[4:] if len(data) > 4 and (len(data) - 4) % FRAME_BYTES == 0 else data
+
         try:
             proc.stdin.write(pcm)
             await proc.stdin.drain()
             self._frames_played += len(pcm) // FRAME_BYTES
-        except (BrokenPipeError, ConnectionResetError) as e:
-            logger.warning(f"Playback pipe broken: {e}. Restarting playback proc.")
+        except (BrokenPipeError, ConnectionResetError):
             await self._restart_playback_proc()
         except Exception as e:
             logger.warning(f"play() error: {e}")
-
-    def stats(self) -> dict:
-        elapsed = time.monotonic() - self._start_time if self._start_time else 0
-        return {
-            "running": self._running,
-            "elapsed_s": round(elapsed, 1),
-            "frames_sent": self._frames_sent,
-            "frames_suppressed": self._frames_suppressed,
-            "frames_played": self._frames_played,
-            "speaking": self._speaking,
-        }
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     async def _start_capture_proc(self) -> None:
         self._capture_proc = await asyncio.create_subprocess_exec(
@@ -154,10 +130,9 @@ class AudioBridge:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        logger.info(f"parecord started. pid={self._capture_proc.pid}")
 
     async def _start_playback_proc(self) -> None:
-        # Buffer latency set to 100ms to eliminate underruns/crackling
+        # Latency set to 100ms with 20ms process time
         self._playback_proc = await asyncio.create_subprocess_exec(
             "pacat",
             f"--device={self.playback_device}",
@@ -166,10 +141,10 @@ class AudioBridge:
             f"--rate={RATE}",
             f"--channels={CHANNELS}",
             "--latency-msec=100",
+            "--process-time-msec=20",
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        logger.info(f"pacat started. pid={self._playback_proc.pid}")
 
     async def _restart_playback_proc(self) -> None:
         await self._stop_proc(self._playback_proc, "playback")
@@ -177,27 +152,20 @@ class AudioBridge:
         if self._running:
             await self._start_playback_proc()
 
-    async def _stop_proc(
-        self,
-        proc: Optional[asyncio.subprocess.Process],
-        name: str,
-    ) -> None:
+    async def _stop_proc(self, proc: Optional[asyncio.subprocess.Process], name: str) -> None:
         if proc is None:
             return
         try:
             proc.terminate()
             await asyncio.wait_for(proc.wait(), timeout=3)
         except asyncio.TimeoutError:
-            logger.warning(f"{name} proc did not exit in time, killing.")
             proc.kill()
             await proc.wait()
-        except Exception as e:
-            logger.warning(f"_stop_proc({name}) error: {e}")
+        except Exception:
+            pass
 
     async def _capture_loop(self) -> None:
-        logger.info("Capture loop started.")
         buf = bytearray()
-
         try:
             while self._running:
                 proc = self._capture_proc
@@ -206,24 +174,18 @@ class AudioBridge:
                     continue
 
                 try:
-                    chunk = await asyncio.wait_for(
-                        proc.stdout.read(FRAME_BYTES * 4),
-                        timeout=1.0,
-                    )
+                    chunk = await asyncio.wait_for(proc.stdout.read(FRAME_BYTES * 4), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
 
                 if not chunk:
-                    logger.warning("Capture proc stdout closed unexpectedly.")
                     if self._running:
-                        logger.info("Restarting capture proc.")
                         await self._stop_proc(self._capture_proc, "capture")
                         await self._start_capture_proc()
                     continue
 
                 buf.extend(chunk)
 
-                # Emit complete frames
                 while len(buf) >= FRAME_BYTES:
                     frame_pcm = bytes(buf[:FRAME_BYTES])
                     buf = buf[FRAME_BYTES:]
@@ -240,15 +202,9 @@ class AudioBridge:
                         try:
                             await self.ws_sender(header + frame_pcm)
                             self._frames_sent += 1
-                        except Exception as e:
-                            logger.warning(f"ws_sender error: {e}")
-
+                        except Exception:
+                            pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"Capture loop error: {e}", exc_info=True)
-        finally:
-            logger.info(
-                f"Capture loop ended. "
-                f"sent={self._frames_sent} suppressed={self._frames_suppressed}"
-            )

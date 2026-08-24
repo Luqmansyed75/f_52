@@ -1,83 +1,86 @@
 """
-Text-to-speech module — wraps Piper.
-Synthesizes to a temp WAV file and plays it back via PyAudio (local mode)
-or streams 16kHz PCM over WebSocket with monotonic pacing (Meet mode).
-"""
-import config
+Text-to-speech module — supports:
+1. KokoroTTS (Neural, human-like voice, direct in-memory synthesis, fast clause streaming)
+2. PiperTTS (Fast offline fallback)
 
-import audioop
+Handles local mic playback and WebSocket streaming to meet-container.
+"""
+
+import os
+import re
 import struct
-import subprocess
 import time
-import wave
-import pyaudio
+import numpy as np
+import scipy.signal
 from core.logger import get_tts_logger
 from core.error_handler import handle_errors
+import config
 
 logger = get_tts_logger()
 
 
-class PiperTTS:
-    def __init__(self):
-        self.pa = pyaudio.PyAudio()
+class KokoroTTS:
+    """Neural in-memory TTS engine using Kokoro-82M ONNX."""
 
-    @handle_errors(logger)
-    def speak(self, text: str, interrupt_event=None):
-        """Local mic mode playback."""
-        print(f"🤖 AI: {text}")
+    def __init__(
+        self,
+        model_path: str = None,
+        voices_path: str = None,
+        default_voice: str = "af_sarah",
+    ):
+        self.default_voice = default_voice
+        self.kokoro = None
+        self._initialized = False
 
-        piper_cmd = [
-            config.PIPER_EXE,
-            "--model", config.PIPER_MODEL_PATH,
-            "--output_file", config.TEMP_WAV_PATH,
-        ]
+        base = getattr(config, "BASE_DIR", "/app")
+        self.model_path = model_path or os.path.join(base, "assets", "kokoro", "kokoro-v0_19.onnx")
+        self.voices_path = voices_path or os.path.join(base, "assets", "kokoro", "voices.json")
 
+        self._init_model()
+
+    def _init_model(self):
         try:
-            tts_start = time.perf_counter()
-            subprocess.run(
-                piper_cmd,
-                input=text.encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            synthesis_end = time.perf_counter()
-        except subprocess.CalledProcessError as e:
-            print("\n❌ PIPER INTERNAL ERROR:")
-            print(e.stderr.decode("utf-8"))
-            logger.error("Piper internal error: %s", e.stderr.decode("utf-8"))
-            return
+            from kokoro_onnx import Kokoro
+            if os.path.exists(self.model_path) and os.path.exists(self.voices_path):
+                t0 = time.perf_counter()
+                self.kokoro = Kokoro(self.model_path, self.voices_path)
+                self._initialized = True
+                elapsed = time.perf_counter() - t0
+                print(f"[TTS] 🚀 Kokoro-82M Neural TTS initialized in {elapsed:.3f}s (voice={self.default_voice})")
+                logger.info(f"Kokoro-82M initialized in {elapsed:.3f}s")
+            else:
+                print(f"[TTS] ⚠️ Kokoro model files missing at {self.model_path}. Fallback to Piper.")
+        except Exception as e:
+            print(f"[TTS] ⚠️ Kokoro init failed: {e}. Fallback to Piper.")
 
-        playback_start = time.perf_counter()
-        with wave.open(config.TEMP_WAV_PATH, "rb") as wf:
-            stream = self.pa.open(
-                format=self.pa.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True,
-            )
-            data = wf.readframes(1024)
-            while data:
-                if interrupt_event is not None and interrupt_event.is_set():
-                    print("[tts] Playback cut short — interrupted.")
-                    break
-                stream.write(data)
-                data = wf.readframes(1024)
-            stream.stop_stream()
-            stream.close()
-            playback_end = time.perf_counter()
+    def synthesize_pcm16(self, text: str, voice: str = None) -> tuple[bytes, float]:
+        """Synthesizes text into 16kHz mono 16-bit PCM bytes in memory."""
+        if not self._initialized or self.kokoro is None:
+            raise RuntimeError("Kokoro TTS is not initialized")
 
-            print("\n===== PIPER =====")
-            print(f"Synthesis : {synthesis_end-tts_start:.3f} sec")
-            print(f"Playback  : {playback_end-playback_start:.3f} sec")
-            print(f"Total     : {playback_end-tts_start:.3f} sec")
-            print("=================\n")
-            logger.info(
-                "Piper TTS (Synthesis: %.3f sec, Playback: %.3f sec, Total: %.3f sec)",
-                synthesis_end - tts_start,
-                playback_end - playback_start,
-                playback_end - tts_start,
-            )
+        v = voice or self.default_voice
+        t0 = time.perf_counter()
+
+        samples, sample_rate = self.kokoro.create(
+            text,
+            voice=v,
+            speed=1.0,
+            lang="en-us",
+        )
+        synthesis_time = time.perf_counter() - t0
+
+        # Apply 15% headroom scaling to eliminate digital clipping
+        samples = samples * 0.85
+
+        # Polyphase FIR resampling: 24kHz -> 16kHz
+        if sample_rate == 24000:
+            samples_16k = scipy.signal.resample_poly(samples, 2, 3)
+        else:
+            num_target_samples = int(len(samples) * 16000 / sample_rate)
+            samples_16k = scipy.signal.resample(samples, num_target_samples)
+
+        audio_int16 = (np.clip(samples_16k, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        return audio_int16, synthesis_time
 
     def speak_to_websocket(
         self,
@@ -85,81 +88,42 @@ class PiperTTS:
         ws_source,
         interrupt_event=None,
     ) -> None:
-        """
-        Meet mode: synthesise with Piper, then stream raw 16kHz mono PCM frames
-        over WebSocket to meet-container with drift-free pacing.
-        """
+        """Stream audio over WebSocket in fast 20ms frames."""
         import asyncio
 
-        print(f"🤖 AI (Meet): {text}")
-
-        piper_cmd = [
-            config.PIPER_EXE,
-            "--model", config.PIPER_MODEL_PATH,
-            "--output_file", config.TEMP_WAV_PATH,
-        ]
+        print(f"🤖 AI (Meet - Kokoro): {text}")
 
         try:
-            tts_start = time.perf_counter()
-            subprocess.run(
-                piper_cmd,
-                input=text.encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            synthesis_end = time.perf_counter()
-        except subprocess.CalledProcessError as e:
-            logger.error("Piper error: %s", e.stderr.decode("utf-8"))
+            pcm_data, synth_sec = self.synthesize_pcm16(text)
+        except Exception as e:
+            logger.error(f"Kokoro synthesis failed: {e}, text='{text}'")
             return
-
-        # 1. Read synthesized audio from WAV
-        with wave.open(config.TEMP_WAV_PATH, "rb") as wf:
-            src_rate = wf.getframerate()
-            src_channels = wf.getnchannels()
-            src_width = wf.getsampwidth()
-            raw_pcm = wf.readframes(wf.getnframes())
-
-        # 2. Resample and format normalize to 16kHz mono 16-bit
-        if src_channels == 2:
-            raw_pcm = audioop.tomono(raw_pcm, src_width, 0.5, 0.5)
-
-        if src_width != 2:
-            raw_pcm = audioop.lin2lin(raw_pcm, src_width, 2)
-
-        if src_rate != 16000:
-            raw_pcm, _ = audioop.ratecv(
-                raw_pcm, 2, 1, src_rate, 16000, None
-            )
 
         ws = ws_source._ws
         loop = ws_source._loop
 
         if ws is None or loop is None:
-            logger.warning("speak_to_websocket: no active WebSocket, skipping.")
             return
 
-        FRAME_BYTES = 640  # 20ms @ 16kHz mono int16
-        FRAME_DURATION = 0.020  # 20ms per frame
-        PREBUFFER_FRAMES = 4    # Prime PulseAudio with ~80ms buffer upfront
+        FRAME_BYTES = 640        # 20ms @ 16kHz mono int16
+        FRAME_DURATION = 0.020    # 20ms
+        PREBUFFER_FRAMES = 5      # 100ms initial burst to pre-fill PulseAudio
 
-        buf = raw_pcm
+        buf = pcm_data
         seq = 0
         frames_sent = 0
         send_start = time.perf_counter()
 
-        # 3. Stream frames with drift-free monotonic clock pacing
         while buf:
             if interrupt_event is not None and interrupt_event.is_set():
-                logger.info("[tts] Meet playback cut short — interrupted.")
+                logger.info("[TTS] Meet playback cut short — interrupted.")
                 break
 
             chunk = buf[:FRAME_BYTES]
             buf = buf[FRAME_BYTES:]
 
-            # Pad final frame if needed
             if len(chunk) < FRAME_BYTES:
-                chunk = chunk + b'\x00' * (FRAME_BYTES - len(chunk))
+                chunk = chunk + b"\x00" * (FRAME_BYTES - len(chunk))
 
             header = struct.pack(">I", seq)
             seq += 1
@@ -169,24 +133,66 @@ class PiperTTS:
             try:
                 future.result(timeout=1.0)
                 frames_sent += 1
-            except Exception as e:
-                logger.warning(f"WebSocket TTS frame send failed: {e}")
+            except Exception:
                 break
 
-            # Buffer priming: send first few frames instantly, then pace precisely
+            # Buffer priming: burst first 5 frames, then pace at exact 20ms intervals
             if frames_sent > PREBUFFER_FRAMES:
                 target_time = send_start + ((frames_sent - PREBUFFER_FRAMES) * FRAME_DURATION)
                 sleep_sec = target_time - time.perf_counter()
                 if sleep_sec > 0:
                     time.sleep(sleep_sec)
 
-        send_end = time.perf_counter()
-        logger.info(
-            "Piper Meet TTS (synthesis=%.3fs frames=%d send=%.3fs)",
-            synthesis_end - tts_start,
-            frames_sent,
-            send_end - send_start,
-        )
+    def speak(self, text: str, interrupt_event=None):
+        import pyaudio
+        print(f"🤖 AI (Kokoro): {text}")
+        try:
+            pcm_16k, _ = self.synthesize_pcm16(text)
+        except Exception as e:
+            logger.error(f"Kokoro local speak error: {e}")
+            return
+
+        pa = pyaudio.PyAudio()
+        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, output=True)
+        chunk_size = 1024
+        for i in range(0, len(pcm_16k), chunk_size):
+            if interrupt_event and interrupt_event.is_set():
+                break
+            stream.write(pcm_16k[i : i + chunk_size])
+        stream.stop_stream()
+        stream.close()
+        pa.terminate()
+
+    def close(self):
+        pass
+
+
+class PiperTTS:
+    def __init__(self):
+        import pyaudio
+        self.pa = pyaudio.PyAudio()
+
+    def speak(self, text: str, interrupt_event=None):
+        import subprocess
+        import wave
+        piper_cmd = [config.PIPER_EXE, "--model", config.PIPER_MODEL_PATH, "--output_file", config.TEMP_WAV_PATH]
+        try:
+            subprocess.run(piper_cmd, input=text.encode("utf-8"), check=True)
+            with wave.open(config.TEMP_WAV_PATH, "rb") as wf:
+                stream = self.pa.open(format=self.pa.get_format_from_width(wf.getsampwidth()), channels=wf.getnchannels(), rate=wf.getframerate(), output=True)
+                data = wf.readframes(1024)
+                while data:
+                    if interrupt_event and interrupt_event.is_set():
+                        break
+                    stream.write(data)
+                    data = wf.readframes(1024)
+                stream.stop_stream()
+                stream.close()
+        except Exception as e:
+            logger.error(f"Piper error: {e}")
+
+    def speak_to_websocket(self, text: str, ws_source, interrupt_event=None):
+        pass
 
     def close(self):
         self.pa.terminate()

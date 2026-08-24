@@ -1,61 +1,53 @@
-FROM ubuntu:24.04
+FROM python:3.10-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-
-# System deps
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
-    portaudio19-dev \
-    libsndfile1 \
-    ffmpeg \
-    curl \
-    wget \
-    unzip \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+ENV PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-COPY backend/requirements.txt /app/requirements.txt
+# Install essential system audio & phonemizer libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    portaudio19-dev \
+    libasound2-dev \
+    pulseaudio-utils \
+    libpulse-dev \
+    wget \
+    curl \
+    espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install torch separately first — largest download, cache it in its own layer
-RUN pip3 install --no-cache-dir --break-system-packages \
-    --timeout 300 --retries 5 \
-    torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip
 
-# Install everything else
-RUN pip3 install --no-cache-dir --break-system-packages \
-    --timeout 300 --retries 5 \
-    -r requirements.txt
+# Install PyTorch CPU using extra-index-url
+RUN pip3 install --no-cache-dir --default-timeout=100 \
+    torch==2.6.0 \
+    torchaudio==2.6.0 \
+    --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Download Linux Piper binary
-RUN mkdir -p /app/piper && \
-    wget -q --tries=5 --timeout=60 -O /tmp/piper.tar.gz \
-    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" && \
-    tar -xzf /tmp/piper.tar.gz -C /app/piper --strip-components=1 && \
-    rm /tmp/piper.tar.gz && \
-    chmod +x /app/piper/piper && \
-    echo "Piper binary installed:" && \
-    ls -lh /app/piper/piper
+# Install application dependencies
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip3 install --no-cache-dir --default-timeout=100 -r /app/backend/requirements.txt
 
-# Download Piper voice model
-RUN mkdir -p /app/assets && \
-    wget -q --tries=5 --timeout=120 \
-    -O /app/assets/en_US-lessac-medium.onnx \
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" && \
-    wget -q --tries=5 --timeout=60 \
-    -O /app/assets/en_US-lessac-medium.onnx.json \
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" && \
-    echo "Piper model installed:" && \
-    ls -lh /app/assets/
+# Create asset directories
+RUN mkdir -p /app/assets/kokoro /app/piper
 
-# Copy project files
+# Download Kokoro-82M ONNX model and voice definitions (~300MB)
+RUN curl -sSL -o /app/assets/kokoro/kokoro-v0_19.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v0_19.onnx && \
+    curl -sSL -o /app/assets/kokoro/voices.json https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.json
+
+# Download Piper binary (fallback engine)
+RUN curl -sSL https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz | tar -xz -C /app/piper --strip-components=1
+
+# Download Piper fallback voice model (Hugging Face) using curl -sSL
+RUN curl -sSL -o /app/assets/en_US-lessac-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx && \
+    curl -sSL -o /app/assets/en_US-lessac-medium.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+
+# Copy project code
 COPY . /app
 
-ENV PYTHONPATH=/app
+EXPOSE 5001
 
-CMD ["python3", "/app/backend/meet_main.py"]
+CMD ["python3", "-m", "backend.meet_main"]

@@ -74,6 +74,7 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GROQ_API_KEYS=${GROQ_API_KEYS}
       - ASR_BACKEND=${ASR_BACKEND:-groq}
+      - TTS_ENGINE=${TTS_ENGINE:-kokoro}
       - ALLOW_HF_DOWNLOAD=1
       - MEET_SERVICE_URL=http://meet-container:5001
       - MEET_SERVICE_WS=ws://meet-container:5001/audio
@@ -94,7 +95,6 @@ services:
       - ./llm:/app/llm
       - ./core:/app/core
       - ./config.py:/app/config.py
-      
   login-helper:
     build:
       context: ./meet-container
