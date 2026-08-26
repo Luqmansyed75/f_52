@@ -10,7 +10,7 @@ Capture path (meeting → backend):
 
 Playback path (backend → meeting):
     receive binary frames over WebSocket
-      → strip 4-byte sequence header
+      → strip 4-byte sequence header per 644-byte frame
       → write clean PCM into bot_in via pacat
 """
 
@@ -23,6 +23,7 @@ from typing import Callable, Optional
 logger = logging.getLogger("audio_bridge")
 
 FRAME_BYTES = 640        # 20ms @ 16kHz mono int16
+MSG_BYTES = 644          # 4-byte header + 640-byte PCM
 RATE = 16000
 CHANNELS = 1
 FORMAT = "s16le"
@@ -32,7 +33,6 @@ PLAYBACK_DEVICE = "bot_in"
 
 class AudioBridge:
     def __init__(
-
         self,
         capture_device: str = CAPTURE_DEVICE,
         playback_device: str = PLAYBACK_DEVICE,
@@ -99,7 +99,7 @@ class AudioBridge:
         self._speaking = speaking
 
     async def play(self, data: bytes) -> None:
-        """Write raw PCM from backend into playback process stdin, stripping sequence header if present."""
+        """Extract clean PCM from WebSocket payloads, stripping sequence headers from ALL concatenated frames."""
         if not self._running:
             return
 
@@ -107,13 +107,25 @@ class AudioBridge:
         if proc is None or proc.stdin is None:
             return
 
-        # Strip 4-byte big-endian sequence header if present (header + 640-byte frame = 644 bytes)
-        pcm = data[4:] if len(data) > 4 and (len(data) - 4) % FRAME_BYTES == 0 else data
+        clean_pcm = bytearray()
+        idx = 0
+
+        # Unpack each 644-byte frame [4-byte seq header][640-byte PCM]
+        while idx + MSG_BYTES <= len(data):
+            clean_pcm.extend(data[idx + 4 : idx + MSG_BYTES])
+            idx += MSG_BYTES
+
+        # Fallback for raw unheadered PCM (exact multiples of 640 bytes)
+        if idx == 0 and len(data) % FRAME_BYTES == 0:
+            clean_pcm.extend(data)
+
+        if not clean_pcm:
+            return
 
         try:
-            proc.stdin.write(pcm)
+            proc.stdin.write(bytes(clean_pcm))
             await proc.stdin.drain()
-            self._frames_played += len(pcm) // FRAME_BYTES
+            self._frames_played += len(clean_pcm) // FRAME_BYTES
         except (BrokenPipeError, ConnectionResetError):
             await self._restart_playback_proc()
         except Exception as e:
@@ -132,7 +144,6 @@ class AudioBridge:
         )
 
     async def _start_playback_proc(self) -> None:
-        # Latency set to 100ms with 20ms process time
         self._playback_proc = await asyncio.create_subprocess_exec(
             "pacat",
             f"--device={self.playback_device}",
@@ -140,7 +151,7 @@ class AudioBridge:
             f"--format={FORMAT}",
             f"--rate={RATE}",
             f"--channels={CHANNELS}",
-            "--latency-msec=100",
+            "--latency-msec=150",
             "--process-time-msec=20",
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

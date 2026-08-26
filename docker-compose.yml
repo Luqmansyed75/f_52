@@ -83,6 +83,9 @@ services:
       - POSTGRES_DSN=postgresql://voiceagent:password@postgres:5432/meetings
       - QDRANT_URL=http://qdrant:6333
       - NATS_URL=nats://nats:4222
+      - TTS_ENGINE=piper
+      - KOKORO_VOICE=${KOKORO_VOICE:-am_adam}
+
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./audio:/app/audio
