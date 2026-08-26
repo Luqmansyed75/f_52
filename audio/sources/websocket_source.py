@@ -3,14 +3,14 @@ WebSocketSource — replaces MicListener for Meet mode.
 
 Connects to meet-container ws://host:port/audio
 Receives binary frames: [4-byte big-endian seq][640 bytes PCM 16kHz mono int16]
-Strips header, writes raw PCM into RingBuffer in 512-byte chunks
+Strips header, writes raw PCM into RingBuffer in 1024-byte chunks
 (matching MicListener's chunk size so Segmenter/VAD see identical frame sizes)
 
-Also handles:
-- Control frames (JSON): session_started, heartbeat, meeting_ended
-- Sends heartbeat back every 5s
-- Sends bot_state_changed when speaking state changes
-- Reconnects automatically on disconnect
+Hard-Boundary Reconnection & Graceful Shutdown:
+- Flushes RingBuffer on disconnect and reconnect
+- Discards stale staging audio fragments
+- Dispatches on_reconnect and on_disconnect callbacks
+- Clean asyncio teardown with zero runtime tracebacks
 """
 
 import asyncio
@@ -27,8 +27,9 @@ logger = logging.getLogger("websocket_source")
 # Must match MicListener chunk size so Segmenter/VAD see identical frame sizes
 MIC_CHUNK_BYTES = 1024
 
-# meet-container sends 640-byte PCM frames (20ms @ 16kHz mono int16)
-WS_FRAME_PCM_BYTES = 640
+# meet-container sends 640-byte PCM frames + 4-byte header = 644 bytes total
+WS_PCM_BYTES = 640
+WS_MSG_BYTES = 644
 
 HEARTBEAT_INTERVAL = 5.0
 RECONNECT_DELAY = 2.0
@@ -37,22 +38,8 @@ MAX_RECONNECT_DELAY = 30.0
 
 class WebSocketSource:
     """
-    Drop-in replacement for MicListener.
-
-    Usage:
-        source = WebSocketSource(
-            uri="ws://meet-container:5001/audio",
-            ring_buffer=ring_buffer,
-            on_session_started=callback,   # optional
-            on_meeting_ended=callback,     # optional
-        )
-        source.start_stream()
-        ...
-        source.stop_stream()
-
-    To signal bot speaking state (suppresses capture echo gate):
-        source.set_speaking(True)
-        source.set_speaking(False)
+    Drop-in replacement for MicListener with hard-boundary reconnect handling
+    and graceful shutdown lifecycle.
     """
 
     def __init__(
@@ -61,11 +48,15 @@ class WebSocketSource:
         ring_buffer,
         on_session_started: Optional[Callable[[str], None]] = None,
         on_meeting_ended: Optional[Callable[[str], None]] = None,
+        on_reconnect: Optional[Callable[[], None]] = None,
+        on_disconnect: Optional[Callable[[], None]] = None,
     ):
         self.uri = uri
         self.ring_buffer = ring_buffer
         self.on_session_started = on_session_started
         self.on_meeting_ended = on_meeting_ended
+        self.on_reconnect = on_reconnect
+        self.on_disconnect = on_disconnect
 
         self._running = False
         self._speaking = False
@@ -73,6 +64,10 @@ class WebSocketSource:
         self._ws = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+
+        # Internal staging buffer for slicing into 1024-byte chunks
+        self._staging_buf = bytearray()
+        self._buf_lock = threading.Lock()
 
         # Stats
         self._frames_received = 0
@@ -100,15 +95,22 @@ class WebSocketSource:
         logger.info(f"WebSocketSource started. uri={self.uri}")
 
     def stop_stream(self) -> None:
-        """Stop the receive loop and close the WebSocket."""
+        """Stop the receive loop and close the WebSocket cleanly."""
         self._running = False
 
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop and self._loop.is_running():
+            # Close active websocket cleanly inside loop before shutting down
+            if self._ws:
+                try:
+                    asyncio.run_coroutine_threadsafe(self._close_ws(), self._loop)
+                except Exception:
+                    pass
 
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=3)
             self._thread = None
+
+        self._flush_boundary("shutdown")
 
         elapsed = time.monotonic() - self._connect_time if self._connect_time else 0
         logger.info(
@@ -117,6 +119,14 @@ class WebSocketSource:
             f"written={self._frames_written} "
             f"reconnects={self._reconnect_count}"
         )
+
+    async def _close_ws(self) -> None:
+        """Helper to close websocket gracefully."""
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
 
     def set_speaking(self, speaking: bool) -> None:
         """
@@ -132,13 +142,41 @@ class WebSocketSource:
         logger.info(f"Bot state → {state}")
 
         if self._loop and self._ws and not self._loop.is_closed():
-            asyncio.run_coroutine_threadsafe(
-                self._send_control({"type": "bot_state_changed", "state": state}),
-                self._loop,
-            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_control({"type": "bot_state_changed", "state": state}),
+                    self._loop,
+                )
+            except Exception:
+                pass
 
     def session_id(self) -> str:
         return self._session_id
+
+    # ------------------------------------------------------------------
+    # Reconnect Hard Boundary Management
+    # ------------------------------------------------------------------
+
+    def _flush_boundary(self, reason: str) -> None:
+        """
+        Hard boundary execution: flushes local staging buffer and RingBuffer
+        so audio before the disconnect/event never corrupts post-reconnect speech.
+        """
+        with self._buf_lock:
+            self._staging_buf.clear()
+
+        if hasattr(self.ring_buffer, "clear"):
+            try:
+                self.ring_buffer.clear()
+            except Exception as e:
+                logger.warning(f"Error clearing RingBuffer: {e}")
+        elif hasattr(self.ring_buffer, "reset"):
+            try:
+                self.ring_buffer.reset()
+            except Exception as e:
+                logger.warning(f"Error resetting RingBuffer: {e}")
+
+        logger.info(f"Hard boundary flush executed (reason: {reason}). Stale audio discarded.")
 
     # ------------------------------------------------------------------
     # Internal — asyncio loop in thread
@@ -149,13 +187,28 @@ class WebSocketSource:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._connect_loop())
+        except (asyncio.CancelledError, RuntimeError):
+            pass
         except Exception as e:
-            logger.error(f"WebSocketSource loop crashed: {e}", exc_info=True)
+            if self._running:
+                logger.error(f"WebSocketSource loop crashed: {e}", exc_info=True)
         finally:
+            try:
+                # Cancel pending tasks cleanly
+                pending = asyncio.all_tasks(self._loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self._loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
             self._loop.close()
 
     async def _connect_loop(self) -> None:
         delay = RECONNECT_DELAY
+        is_initial_connect = True
 
         while self._running:
             try:
@@ -163,38 +216,58 @@ class WebSocketSource:
                 async with websockets.connect(
                     self.uri,
                     max_size=None,
-                    ping_interval=None,   # we handle heartbeats manually
+                    ping_interval=None,
                     ping_timeout=None,
                 ) as ws:
                     self._ws = ws
                     self._connect_time = time.monotonic()
-                    delay = RECONNECT_DELAY  # reset backoff on success
-                    logger.info("WebSocket connected.")
+                    delay = RECONNECT_DELAY
 
+                    if not is_initial_connect:
+                        logger.info("Reconnected to WebSocket audio stream. Applying hard boundary reset.")
+                        self._flush_boundary("reconnected")
+                        if self.on_reconnect:
+                            try:
+                                self.on_reconnect()
+                            except Exception as e:
+                                logger.exception(f"Error in on_reconnect callback: {e}")
+                    else:
+                        is_initial_connect = False
+
+                    logger.info("WebSocket connected successfully.")
                     await self._session_loop(ws)
 
-            except websockets.ConnectionClosed as e:
-                logger.warning(f"WebSocket closed: {e}")
+            except websockets.ConnectionClosed:
+                if self._running:
+                    logger.warning("WebSocket connection closed by remote.")
             except OSError as e:
-                logger.warning(f"WebSocket connection failed: {e}")
+                if self._running:
+                    logger.warning(f"WebSocket connection failed: {e}")
             except Exception as e:
-                logger.error(f"WebSocket error: {e}", exc_info=True)
+                if self._running:
+                    logger.error(f"WebSocket error: {e}", exc_info=True)
             finally:
                 self._ws = None
+                if self._running:
+                    self._flush_boundary("disconnected")
+                    if self.on_disconnect:
+                        try:
+                            self.on_disconnect()
+                        except Exception as e:
+                            logger.exception(f"Error in on_disconnect callback: {e}")
 
             if not self._running:
                 break
 
             self._reconnect_count += 1
             logger.info(f"Reconnecting in {delay}s ... (attempt {self._reconnect_count})")
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                break
             delay = min(delay * 2, MAX_RECONNECT_DELAY)
 
     async def _session_loop(self, ws) -> None:
-        """
-        Run heartbeat sender and frame receiver concurrently.
-        Returns when either task finishes (disconnect, stop, error).
-        """
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
         receive_task = asyncio.create_task(self._receive_loop(ws))
 
@@ -214,75 +287,66 @@ class WebSocketSource:
             receive_task.cancel()
 
     async def _receive_loop(self, ws) -> None:
-        """Receive frames from meet-container and route to RingBuffer."""
-        buf = bytearray()
+        try:
+            async for message in ws:
+                if not self._running:
+                    break
 
-        async for message in ws:
-            if not self._running:
-                break
+                if isinstance(message, bytes):
+                    msg_len = len(message)
+                    if msg_len < 4:
+                        continue
 
-            # --- Binary frame: PCM audio ---
-            if isinstance(message, bytes):
-                if len(message) < 4:
-                    logger.warning(f"Short binary frame: {len(message)} bytes, skipping.")
+                    clean_pcm = bytearray()
+                    if msg_len >= WS_MSG_BYTES and msg_len % WS_MSG_BYTES == 0:
+                        idx = 0
+                        while idx + WS_MSG_BYTES <= msg_len:
+                            clean_pcm.extend(message[idx + 4 : idx + WS_MSG_BYTES])
+                            idx += WS_MSG_BYTES
+                    else:
+                        clean_pcm.extend(message[4:])
+
+                    self._frames_received += 1
+
+                    with self._buf_lock:
+                        self._staging_buf.extend(clean_pcm)
+                        while len(self._staging_buf) >= MIC_CHUNK_BYTES:
+                            chunk = bytes(self._staging_buf[:MIC_CHUNK_BYTES])
+                            self._staging_buf = self._staging_buf[MIC_CHUNK_BYTES:]
+                            self.ring_buffer.write(chunk)
+                            self._frames_written += 1
                     continue
 
-                # Strip 4-byte sequence header
-                pcm = message[4:]
-                self._frames_received += 1
-
-                # Flush into RingBuffer in MIC_CHUNK_BYTES chunks
-                # This makes Segmenter/VAD see identical frame sizes as MicListener
-                buf.extend(pcm)
-                while len(buf) >= MIC_CHUNK_BYTES:
-                    chunk = bytes(buf[:MIC_CHUNK_BYTES])
-                    buf = buf[MIC_CHUNK_BYTES:]
-                    self.ring_buffer.write(chunk)
-                    self._frames_written += 1
-
-                continue
-
-            # --- Control frame: JSON text ---
-            if isinstance(message, str):
-                await self._handle_control(message)
-                continue
+                if isinstance(message, str):
+                    await self._handle_control(message)
+                    continue
+        except (websockets.ConnectionClosed, asyncio.CancelledError):
+            pass
 
     async def _handle_control(self, raw: str) -> None:
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning(f"Non-JSON control frame: {raw[:80]}")
             return
 
         msg_type = msg.get("type", "")
-
         if msg_type == "session_started":
             self._session_id = msg.get("session_id", "")
-            logger.info(f"session_started. session_id={self._session_id}")
+            logger.info(f"session_started received. session_id={self._session_id}")
             if self.on_session_started:
                 self.on_session_started(self._session_id)
-
-        elif msg_type == "heartbeat":
-            # meet-container is alive — nothing to do, we send our own heartbeat
-            pass
-
         elif msg_type == "meeting_ended":
             reason = msg.get("reason", "unknown")
-            logger.info(f"meeting_ended. reason={reason}")
+            logger.info(f"meeting_ended received. reason={reason}")
             if self.on_meeting_ended:
                 self.on_meeting_ended(reason)
 
-        elif msg_type == "bot_state_changed":
-            # echo from meet-container confirming our state change
-            pass
-
-        else:
-            logger.debug(f"Unhandled control frame: {msg_type}")
-
     async def _heartbeat_loop(self, ws) -> None:
-        """Send heartbeat to meet-container every 5s."""
         while self._running:
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+            except asyncio.CancelledError:
+                break
             if not self._running:
                 break
             await self._send_control({"type": "heartbeat", "ts": time.time()})
@@ -293,5 +357,5 @@ class WebSocketSource:
             return
         try:
             await ws.send(json.dumps(msg))
-        except Exception as e:
-            logger.warning(f"_send_control failed: {e}")
+        except Exception:
+            pass

@@ -1,9 +1,10 @@
 """
 Text-to-speech module — supports:
-1. PiperTTS (Ultra-fast ~30ms C++ engine, crackle-free)
+1. PiperTTS (Ultra-fast ~30ms in-memory C++ engine, FIR-resampled, crackle-free)
 2. KokoroTTS (Neural human voice)
 """
 
+import audioop
 import os
 import struct
 import subprocess
@@ -11,7 +12,6 @@ import time
 import wave
 import numpy as np
 import scipy.signal
-import audioop
 from core.logger import get_tts_logger
 import config
 
@@ -19,7 +19,7 @@ logger = get_tts_logger()
 
 
 class PiperTTS:
-    """Ultra-fast, lightweight Piper C++ TTS Engine."""
+    """Ultra-fast, lightweight Piper C++ TTS Engine with FIR resampling & in-memory processing."""
 
     def __init__(self):
         self.piper_exe = getattr(config, "PIPER_EXE", "/app/piper/piper")
@@ -27,7 +27,7 @@ class PiperTTS:
         self.temp_wav = getattr(config, "TEMP_WAV_PATH", "/tmp/tts_out.wav")
 
     def synthesize_pcm16(self, text: str) -> bytes:
-        """Synthesizes text using Piper C++ binary and resamples to 16kHz mono int16."""
+        """Synthesizes text using Piper C++ binary with FIR anti-aliased resampling to 16kHz mono int16."""
         piper_cmd = [
             self.piper_exe,
             "--model", self.model_path,
@@ -48,15 +48,31 @@ class PiperTTS:
             src_width = wf.getsampwidth()
             raw_pcm = wf.readframes(wf.getnframes())
 
-        # Format normalization to 16kHz mono 16-bit PCM
-        if src_channels == 2:
-            raw_pcm = audioop.tomono(raw_pcm, src_width, 0.5, 0.5)
-        if src_width != 2:
-            raw_pcm = audioop.lin2lin(raw_pcm, src_width, 2)
-        if src_rate != 16000:
-            raw_pcm, _ = audioop.ratecv(raw_pcm, 2, 1, src_rate, 16000, None)
+        # Convert raw PCM to float32 numpy array for high-quality FIR processing
+        audio_data = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
-        return raw_pcm
+        # Downmix stereo to mono if needed
+        if src_channels == 2:
+            audio_data = audio_data.reshape(-1, 2).mean(axis=1)
+
+        # Apply 15% headroom scaling to prevent digital clipping in WebRTC
+        audio_data = audio_data * 0.85
+
+        # Polyphase FIR anti-aliased resampling to 16kHz
+        if src_rate == 22050:
+            # 22050 -> 16000 (ratio 320 / 441)
+            audio_16k = scipy.signal.resample_poly(audio_data, 320, 441)
+        elif src_rate == 24000:
+            # 24000 -> 16000 (ratio 2 / 3)
+            audio_16k = scipy.signal.resample_poly(audio_data, 2, 3)
+        elif src_rate != 16000:
+            num_samples = int(len(audio_data) * 16000 / src_rate)
+            audio_16k = scipy.signal.resample(audio_data, num_samples)
+        else:
+            audio_16k = audio_data
+
+        pcm_16k = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        return pcm_16k
 
     def speak_to_websocket(self, text: str, ws_source, interrupt_event=None) -> None:
         """Stream Piper audio over WebSocket in 20ms frames with prebuffering."""
@@ -80,7 +96,7 @@ class PiperTTS:
 
         FRAME_BYTES = 640
         FRAME_DURATION = 0.020
-        PREBUFFER_FRAMES = 5  # 100ms jitter buffer
+        PREBUFFER_FRAMES = 4  # 80ms smooth jitter buffer
 
         buf = pcm_data
         seq = 0

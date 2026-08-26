@@ -1,11 +1,16 @@
 """
 Meet-mode entrypoint for the AI Meeting Representative.
 
-Differences from main.py:
-  - Audio source: WebSocketSource (from meet-container) instead of MicListener
-  - Audio sink: TTS audio sent back over WebSocket to meet-container
-  - Join/leave: HTTP calls to meet-container
-  - Everything else (VAD, ASR, LLM, RAG, memory) is identical
+Features:
+  - SessionStateMachine tracking (STARTING -> JOINING -> CONNECTED -> LEAVING -> STOPPED)
+  - Background Heartbeat sender to meet-container (every 5s)
+  - WebSocketSource audio streaming
+  - Silero VAD + Segmenter + Groq Whisper ASR (3-key load balancer)
+  - Barge-in InterruptWatcher
+  - Qdrant VectorStore RAG + Conversation Memory
+  - Groq Llama streaming LLM + PromptBuilder
+  - Piper / Kokoro Neural TTS over WebSocket
+  - Voice-activated and command-based meeting exit
 """
 
 import asyncio
@@ -15,8 +20,8 @@ import os
 import struct
 import threading
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from queue import Empty, Queue
 
 import config
@@ -25,6 +30,8 @@ from audio.barge_in import InterruptWatcher
 from audio.sources.websocket_source import WebSocketSource
 from audio.vad import SileroVAD
 from core.event_bus import EventBus, RESPONSE_GENERATED, TRANSCRIPT_CREATED
+from core.session_state import SessionState, SessionStateMachine
+from core.observability import TurnTracker, LatencyAggregator
 from llm.llm_router import LLMRouter
 from llm.prompt_builder import PromptBuilder
 from llm.retrieval import retrieve_context
@@ -48,9 +55,13 @@ logging.basicConfig(
 logger = logging.getLogger("meet_main")
 
 # ---------------------------------------------------------------------------
+# Global Session State Machine
+# ---------------------------------------------------------------------------
+sm = SessionStateMachine()
+
+# ---------------------------------------------------------------------------
 # Config from environment
 # ---------------------------------------------------------------------------
-
 MEET_SERVICE_URL = os.environ.get("MEET_SERVICE_URL", "http://meet-container:5001")
 MEET_SERVICE_WS  = os.environ.get("MEET_SERVICE_WS",  "ws://meet-container:5001/audio")
 MEET_URL         = os.environ.get("MEET_URL", "")
@@ -70,10 +81,10 @@ EXIT_PHRASES = [
 ]
 
 # ---------------------------------------------------------------------------
-# Meet-container HTTP helpers
+# Meet-container HTTP helpers & Heartbeat
 # ---------------------------------------------------------------------------
 
-def _http_post(path: str, body: dict) -> dict:
+def _http_post(path: str, body: dict, timeout: float = 30.0) -> dict:
     url = f"{MEET_SERVICE_URL}{path}"
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -82,21 +93,21 @@ def _http_post(path: str, body: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
 def join_meeting(meet_url: str) -> str:
     """Tell meet-container to join the meeting. Returns session_id."""
-    logger.info(f"Joining meeting: {meet_url}")
+    logger.info(f"[{sm.session_id}] Joining meeting: {meet_url}")
     try:
         result = _http_post("/join", {"meet_url": meet_url})
         session_id = result.get("session_id", "")
-        logger.info(f"Joined. session_id={session_id} lifecycle={result.get('lifecycle')}")
+        logger.info(f"[{sm.session_id}] Joined. session_id={session_id} lifecycle={result.get('lifecycle')}")
         return session_id
     except urllib.error.HTTPError as e:
         if e.code == 409:
-            logger.info("Bot is already in the meeting room (409 Conflict). Continuing...")
+            logger.info(f"[{sm.session_id}] Bot is already in the meeting room (409 Conflict). Continuing...")
             return "reused"
         raise
 
@@ -104,10 +115,42 @@ def join_meeting(meet_url: str) -> str:
 def leave_meeting() -> None:
     """Tell meet-container to leave the meeting."""
     try:
-        _http_post("/leave", {})
-        logger.info("🚪 Left meeting successfully.")
+        _http_post("/leave", {}, timeout=10.0)
+        logger.info(f"[{sm.session_id}] 🚪 Left meeting successfully.")
     except Exception as e:
-        logger.warning(f"leave_meeting failed: {e}")
+        logger.warning(f"[{sm.session_id}] leave_meeting failed: {e}")
+
+
+def _heartbeat_loop(stop_event: threading.Event) -> None:
+    """Background thread sending heartbeats every 5 seconds to meet-container."""
+    logger.info(f"[{sm.session_id}] Heartbeat sender thread active.")
+    consecutive_failures = 0
+
+    while not stop_event.is_set():
+        if stop_event.wait(5.0):
+            break
+
+        if sm.is_terminal():
+            break
+
+        try:
+            _http_post(
+                "/heartbeat",
+                {"session_id": sm.session_id, "state": sm.current_state.value},
+                timeout=3.0,
+            )
+            if consecutive_failures > 0:
+                logger.info(f"[{sm.session_id}] Heartbeat to meet-container recovered.")
+                if sm.current_state == SessionState.DEGRADED:
+                    sm.transition_to(SessionState.CONNECTED, reason="heartbeat_recovered")
+            consecutive_failures = 0
+        except Exception as e:
+            consecutive_failures += 1
+            if consecutive_failures >= 3 and sm.current_state == SessionState.CONNECTED:
+                logger.warning(
+                    f"[{sm.session_id}] Heartbeat failed {consecutive_failures} times ({e}). Setting state to DEGRADED."
+                )
+                sm.transition_to(SessionState.DEGRADED, reason="heartbeat_failed")
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +224,7 @@ def start_meeting() -> None:
         logger.error("MEET_URL environment variable not set. Exiting.")
         return
 
-    logger.info("Starting AI Meeting Representative (Meet mode)...")
+    logger.info(f"[{sm.session_id}] Starting AI Meeting Representative (Meet mode)...")
     load_start = time.perf_counter()
 
     segment_queue: Queue = Queue(maxsize=20)
@@ -192,12 +235,17 @@ def start_meeting() -> None:
     ring_buffer = RingBuffer()
 
     meeting_ended_event = threading.Event()
+    heartbeat_stop_event = threading.Event()
 
     def on_session_started(session_id: str) -> None:
-        logger.info(f"WebSocket session established: {session_id}")
+        logger.info(f"[{sm.session_id}] WebSocket audio session established: {session_id}")
+        if sm.current_state in {SessionState.JOINING, SessionState.RECONNECTING, SessionState.DEGRADED}:
+            sm.transition_to(SessionState.CONNECTED, reason="websocket_stream_ready")
 
     def on_meeting_ended(reason: str) -> None:
-        logger.info(f"Meeting ended: {reason}")
+        logger.info(f"[{sm.session_id}] Meeting ended by remote: {reason}")
+        if sm.can_transition_to(SessionState.LEAVING):
+            sm.transition_to(SessionState.LEAVING, reason=f"remote_ended_{reason}")
         meeting_ended_event.set()
 
     ws_source = WebSocketSource(
@@ -234,9 +282,19 @@ def start_meeting() -> None:
     conversation_memory = ConversationMemory(max_turns=10)
     prompt_builder = PromptBuilder()
     meet_session_id = db.create_session()
+    latency_agg = LatencyAggregator(window_size=20)
 
     load_end = time.perf_counter()
-    logger.info(f"Model + service loading: {load_end - load_start:.3f}s")
+    logger.info(f"[{sm.session_id}] Model + service loading: {load_end - load_start:.3f}s")
+
+    # Start Heartbeat watchdog pinger thread
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(heartbeat_stop_event,),
+        daemon=True,
+        name="heartbeat-pinger",
+    )
+    heartbeat_thread.start()
 
     event_queue: Queue[dict] = Queue()
     worker_stop = threading.Event()
@@ -251,16 +309,16 @@ def start_meeting() -> None:
     bus.subscribe(config.SUBJECT_LLM_FINISHED,   lambda p: session_manager.refresh_activity())
 
     def _barge_in_monitor():
-        while True:
-            watcher.interrupt_event.wait()
-            try:
-                bus.publish(config.SUBJECT_BARGE_IN, {"timestamp": time.time()})
-            except Exception:
-                pass
-            session_manager.refresh_activity()
-            watcher.interrupt_event.clear()
+        while not worker_stop.is_set():
+            if watcher.interrupt_event.wait(timeout=0.5):
+                try:
+                    bus.publish(config.SUBJECT_BARGE_IN, {"timestamp": time.time()})
+                except Exception:
+                    pass
+                session_manager.refresh_activity()
+                watcher.interrupt_event.clear()
 
-    threading.Thread(target=_barge_in_monitor, daemon=True).start()
+    threading.Thread(target=_barge_in_monitor, daemon=True, name="barge-in-monitor").start()
 
     def worker() -> None:
         def process_payload(payload: dict) -> None:
@@ -268,6 +326,13 @@ def start_meeting() -> None:
             text = event.text.strip()
             if not text:
                 return
+
+            # --- Observability: start turn tracking ---
+            tracker = TurnTracker()
+            tracker.mark("audio_received")
+            tracker.set_metadata("text_len", str(len(text)))
+            asr_latency = payload.get("latency", 0.0)
+            tracker.set_metadata("asr_latency", f"{asr_latency:.3f}s")
 
             speaker = event.speaker
             created_at = event.timestamp
@@ -313,12 +378,18 @@ def start_meeting() -> None:
                 top_k=5,
             )
 
+            tracker.mark("rag_retrieved")
             turn_interrupted = {"flag": False}
+            first_sentence_logged = {"done": False}
 
             def on_sentence(sentence: str) -> None:
                 if turn_interrupted["flag"]:
                     return
 
+                if not first_sentence_logged["done"]:
+                    tracker.mark("llm_first_sentence")
+                    tracker.mark("tts_started")
+                    first_sentence_logged["done"] = True
                 # Signal meet-container: bot is now SPEAKING
                 ws_source.set_speaking(True)
 
@@ -351,21 +422,33 @@ def start_meeting() -> None:
                 watcher.stop()
                 ws_source.set_speaking(False)
 
+            tracker.mark("tts_complete")
+
             if turn_interrupted["flag"]:
-                logger.info("User interrupted assistant.")
+                logger.info(f"[{sm.session_id}] User interrupted assistant.")
                 session_manager.refresh_activity()
+                tracker.set_metadata("interrupted", "true")
+                tracker.mark("turn_complete")
+                tracker.log_summary()
+                latency_agg.record_turn(tracker)
                 return
 
             if response_text is None:
-                logger.warning("LLM stream_reply failed.")
+                logger.warning(f"[{sm.session_id}] LLM stream_reply failed.")
+                tracker.mark("turn_complete")
+                tracker.log_summary()
+                latency_agg.record_turn(tracker)
                 return
-
             db.insert_response(
                 payload_session_id,
                 response_text,
                 triggering_utterance_id=utterance_id,
             )
             conversation_memory.add_assistant(response_text)
+            tracker.mark("turn_complete")
+            tracker.log_summary()
+            latency_agg.record_turn(tracker)
+            latency_agg.log_stats()
 
             bus.publish(
                 RESPONSE_GENERATED,
@@ -379,14 +462,16 @@ def start_meeting() -> None:
 
             # If user requested exit or LLM said goodbye, execute meeting leave
             if is_exit_command or any(w in response_text.lower() for w in ["leaving the meeting", "goodbye", "bye!"]):
-                logger.info("🔴 Exit triggered. Waiting 2.0s for TTS audio playback to complete...")
+                logger.info(f"[{sm.session_id}] 🔴 Voice exit triggered. Waiting 2.0s for TTS playback...")
                 time.sleep(2.0)
+                if sm.can_transition_to(SessionState.LEAVING):
+                    sm.transition_to(SessionState.LEAVING, reason="voice_leave_command")
                 leave_meeting()
                 meeting_ended_event.set()
 
         def _on_session_expired(payload: dict) -> None:
             conversation_memory.clear()
-            logger.info("Session expired. Conversation cleared.")
+            logger.info(f"[{sm.session_id}] Session expired. Conversation cleared.")
 
         bus.subscribe(
             config.SUBJECT_SESSION_EXPIRED,
@@ -406,25 +491,26 @@ def start_meeting() -> None:
         handle_transcript,
         durable="meeting_transcript_consumer",
     )
-    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread = threading.Thread(target=worker, daemon=True, name="llm-worker")
     worker_thread.start()
 
     # --- Join meeting via HTTP ---
+    sm.transition_to(SessionState.JOINING, reason="requesting_join")
     try:
         join_meeting(MEET_URL)
     except Exception as e:
-        logger.error(f"Failed to join meeting: {e}")
+        logger.error(f"[{sm.session_id}] Failed to join meeting: {e}")
+        sm.transition_to(SessionState.STOPPED, reason=f"join_failed_{e}")
         bus.close()
         db.close()
         return
 
     # --- Start audio pipeline ---
     ws_source.start_stream()
-
     segmenter.start_segmenter()
     asr_worker.start_worker()
 
-    logger.info("--- 🟢 MEET MODE READY ---")
+    logger.info(f"[{sm.session_id}] --- 🟢 MEET MODE READY ---")
 
     try:
         while not meeting_ended_event.is_set():
@@ -452,8 +538,12 @@ def start_meeting() -> None:
             )
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user.")
+        logger.info(f"[{sm.session_id}] Interrupted by user.")
     finally:
+        if sm.can_transition_to(SessionState.LEAVING):
+            sm.transition_to(SessionState.LEAVING, reason="shutdown")
+
+        heartbeat_stop_event.set()
         worker_stop.set()
         worker_thread.join(timeout=2)
 
@@ -465,7 +555,9 @@ def start_meeting() -> None:
         leave_meeting()
         bus.close()
         db.close()
-        logger.info("Meet mode shutdown complete.")
+
+        sm.transition_to(SessionState.STOPPED, reason="shutdown_complete")
+        logger.info(f"[{sm.session_id}] Meet mode shutdown complete.")
 
 
 if __name__ == "__main__":
