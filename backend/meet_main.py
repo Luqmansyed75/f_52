@@ -331,10 +331,14 @@ def start_meeting() -> None:
             tracker = TurnTracker()
             tracker.mark("audio_received")
             tracker.set_metadata("text_len", str(len(text)))
-            asr_latency = payload.get("latency", 0.0)
+            # ASR latency comes from the assembled transcript event's
+            # asr_seconds field (accumulated by TranscriptAssembler),
+            # not from a "latency" key that no longer exists on the wire.
+            asr_latency = event.asr_seconds
             tracker.set_metadata("asr_latency", f"{asr_latency:.3f}s")
 
-            speaker = event.speaker
+            speaker = event.speaker if event.speaker != "unknown" else "Participant"
+            tracker.set_metadata("speaker", speaker)
             created_at = event.timestamp
             payload_session_id = event.session_id
 
@@ -525,6 +529,7 @@ def start_meeting() -> None:
 
             if not user_text:
                 continue
+            active_speaker = ws_source.get_current_speaker() or "unknown"
 
             bus.publish(
                 TRANSCRIPT_CREATED,
@@ -532,7 +537,7 @@ def start_meeting() -> None:
                     session_id=meet_session_id,
                     text=user_text,
                     timestamp=timestamp,
-                    speaker="unknown",
+                    speaker=active_speaker,
                     asr_seconds=latency,
                 ).model_dump(),
             )

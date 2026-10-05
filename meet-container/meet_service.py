@@ -41,10 +41,40 @@ class ServerState:
         self.bridge: Optional[AudioBridge] = None
         self.backend_ws: Optional[WebSocket] = None
         self.last_heartbeat_time: float = time.time()
+        self.current_speaker: Optional[str] = None
         self.lock = asyncio.Lock()
 
 
 state = ServerState()
+
+
+async def active_speaker_poller_loop():
+    """Polls Playwright DOM for active speaker changes and streams updates over WebSocket."""
+    logger.info("Active speaker poller loop started.")
+    while True:
+        await asyncio.sleep(0.25)  # Poll every 250ms
+        if not state.is_joined or not state.automation:
+            continue
+
+        try:
+            active_speaker = await state.automation.get_active_speaker()
+            if active_speaker != state.current_speaker:
+                state.current_speaker = active_speaker
+                logger.info(f"[Diarization] Speaker changed: {active_speaker or 'quiet'}")
+
+                if state.backend_ws:
+                    # Stream active speaker control frame to backend
+                    try:
+                        await state.backend_ws.send_text(
+                            json.dumps({
+                                "type": "speaker_changed",
+                                "name": active_speaker or "unknown",
+                            })
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Speaker poller error: {e}")
 
 
 async def heartbeat_watchdog_loop():
@@ -72,6 +102,7 @@ async def heartbeat_watchdog_loop():
                         state.is_joined = False
                         state.current_url = None
                         state.session_id = None
+                        state.current_speaker = None
                         logger.info("Emergency auto-leave completed successfully.")
                     except Exception as e:
                         logger.exception(f"Failed to execute emergency auto-leave: {e}")
@@ -83,9 +114,11 @@ async def lifespan(app: FastAPI):
     state.automation = MeetAutomation()
     await state.automation.start()
     watchdog_task = asyncio.create_task(heartbeat_watchdog_loop())
+    speaker_task = asyncio.create_task(active_speaker_poller_loop())
     yield
     logger.info("meet_service shutting down...")
     watchdog_task.cancel()
+    speaker_task.cancel()
     if state.bridge:
         await state.bridge.stop()
     if state.automation:
@@ -102,6 +135,7 @@ async def health():
         "status": "ok",
         "is_joined": state.is_joined,
         "session_id": state.session_id,
+        "current_speaker": state.current_speaker,
         "time_since_last_heartbeat": round(time.time() - state.last_heartbeat_time, 2),
     }
 
@@ -159,6 +193,7 @@ async def leave_meeting():
         state.is_joined = False
         state.current_url = None
         state.session_id = None
+        state.current_speaker = None
         logger.info("Left meeting.")
         return {"status": "ok"}
 

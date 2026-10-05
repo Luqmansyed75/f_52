@@ -34,6 +34,10 @@ class _AssemblyState:
         self.timer: Optional[threading.Timer] = None
         self.last_emitted_text: Optional[str] = None
         self.last_emitted_at: float = 0.0
+        # Accumulated ASR latency across chunks of this turn (seconds)
+        self.asr_seconds_total: float = 0.0
+        # Latest known diarized speaker for this turn ("unknown" if never set)
+        self.speaker: str = "unknown"
 
 
 class TranscriptAssembler:
@@ -56,6 +60,9 @@ class TranscriptAssembler:
         session_id = payload.get("session_id")
         text = payload.get("text", "").strip()
         ts = payload.get("timestamp", time.time())
+        # ASR latency for this chunk (seconds) and diarized speaker name
+        asr_seconds = float(payload.get("asr_seconds", 0.0) or 0.0)
+        speaker = payload.get("speaker", "unknown") or "unknown"
 
         if not text:
             return
@@ -108,6 +115,11 @@ class TranscriptAssembler:
             if state.first_ts is None:
                 state.first_ts = ts
             state.last_ts = ts
+
+            # Accumulate ASR latency and track the latest real speaker
+            state.asr_seconds_total += asr_seconds
+            if speaker and speaker != "unknown":
+                state.speaker = speaker
 
             # Cancel previous finalize timer and start a new one
             if state.timer is not None:
@@ -174,9 +186,9 @@ class TranscriptAssembler:
                 {
                     "session_id": session_id,
                     "text": assembled,
-                    "speaker": "unknown",
+                    "speaker": state.speaker,
                     "timestamp": state.last_ts or now,
-                    "asr_seconds": 0.0,
+                    "asr_seconds": state.asr_seconds_total,
                 },
             )
         except Exception:

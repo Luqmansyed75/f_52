@@ -1,11 +1,13 @@
 import asyncio
 import glob
+import json
 import logging
 import os
 import subprocess
 import time
 import urllib.request
 import urllib.error
+from typing import Optional
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 logger = logging.getLogger("meet_automation")
@@ -48,7 +50,6 @@ class MeetAutomation:
             "--no-default-browser-check",
             "--disable-background-networking",
             "--disable-sync",
-            # Automatically accept mic/cam permission prompts
             "--use-fake-ui-for-media-stream",
             "--autoplay-policy=no-user-gesture-required",
         ]
@@ -174,10 +175,135 @@ class MeetAutomation:
 
         return True
 
+    async def get_active_speaker(self) -> Optional[str]:
+        """
+        Polls Google Meet active speaker indicators in the browser DOM.
+        Returns speaker's name, or None if quiet.
+
+        Detection strategies for the 2024/2025 Google Meet DOM:
+          1. div[data-is-speaking="true"] tiles (primary Meet attribute)
+          2. [jsname="A5il2e"] speaking indicator elements (animated bars)
+          3. div[data-participant-id] tiles containing an active indicator
+          4. Legacy speaking/audio indicator classnames
+          5. Highlighted (blue border) speaker tiles
+
+        Name extraction prefers [data-self-name], then notranslate spans,
+        then name/Label class containers, then the tile aria-label, then
+        the first non-empty text line. "(you)"/"(Guest)" suffixes are
+        stripped, and the bot's own name (BOT_NAME) is filtered out so
+        the bot never labels itself as the active speaker.
+        """
+        if not self.page:
+            return None
+
+        try:
+            js_script = """
+            () => {
+                const BOT_NAME = __BOT_NAME__;
+                const botLower = (BOT_NAME || "").toLowerCase();
+
+                const cleanName = (raw) => {
+                    if (!raw) return null;
+                    let name = String(raw)
+                        .replace(/\\s*\\(you\\)\\s*/gi, "")
+                        .replace(/\\s*\\(guest\\)\\s*/gi, "")
+                        .replace(/\\s*\\(host\\)\\s*/gi, "")
+                        .trim();
+                    if (!name) return null;
+                    if (botLower && name.toLowerCase().includes(botLower)) return null;
+                    return name;
+                };
+
+                const extractFromTile = (tile) => {
+                    if (!tile) return null;
+                    // Preferred: explicit self-name attribute
+                    let el = tile.querySelector('[data-self-name]');
+                    if (el) {
+                        const n = cleanName(el.getAttribute('data-self-name'));
+                        if (n) return n;
+                    }
+                    // Meet renders participant names in notranslate spans
+                    for (const sel of ['span[class*="notranslate"]', 'div[class*="name"]', 'div[class*="Label"]']) {
+                        el = tile.querySelector(sel);
+                        if (el && el.textContent) {
+                            const n = cleanName(el.textContent);
+                            if (n) return n;
+                        }
+                    }
+                    // Tile aria-label usually starts with the participant name
+                    const aria = tile.getAttribute('aria-label');
+                    if (aria) {
+                        const n = cleanName(aria.split(',')[0].split('\\n')[0]);
+                        if (n) return n;
+                    }
+                    // Last resort: first non-empty line of tile text
+                    const lines = (tile.innerText || '').split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                    for (const line of lines) {
+                        const n = cleanName(line);
+                        if (n) return n;
+                    }
+                    return null;
+                };
+
+                // Strategy 1: official data-is-speaking tiles (may be several)
+                let tiles = document.querySelectorAll('div[data-is-speaking="true"]');
+                for (const tile of tiles) {
+                    const n = extractFromTile(tile);
+                    if (n) return n;
+                }
+
+                // Strategy 2: speaking indicator element (animated bars)
+                let indicators = document.querySelectorAll('[jsname="A5il2e"]');
+                for (const ind of indicators) {
+                    const tile = ind.closest('div[data-is-speaking], div[role="listitem"], div[data-participant-id], div[class*="tile"]');
+                    const n = extractFromTile(tile);
+                    if (n) return n;
+                }
+
+                // Strategy 3: participant tiles containing an active audio indicator
+                tiles = document.querySelectorAll('div[data-participant-id]');
+                for (const tile of tiles) {
+                    if (tile.querySelector('[jsname="A5il2e"], div[class*="speaking"], div[class*="audio-indicator"]')) {
+                        const n = extractFromTile(tile);
+                        if (n) return n;
+                    }
+                }
+
+                // Strategy 4: legacy speaking/audio indicator classnames
+                indicators = document.querySelectorAll('div[class*="speaking-indicator"], div[class*="audio-indicator"], svg[class*="indicator"]');
+                for (const icon of indicators) {
+                    const tile = icon.closest('div[role="listitem"], div[data-participant-id], div[class*="tile"], div[class*="Participant"]');
+                    const n = extractFromTile(tile);
+                    if (n) return n;
+                }
+
+                // Strategy 5: highlighted (blue border) speaker tiles
+                tiles = document.querySelectorAll('div[class*="GQ8Yec"], div[style*="border-color"]');
+                for (const tile of tiles) {
+                    const style = window.getComputedStyle(tile);
+                    const borderColor = (style.borderColor || '').toLowerCase();
+                    if (borderColor.includes('138, 180, 248') || borderColor.includes('#8ab4f8') || borderColor.includes('rgb(138')) {
+                        const n = extractFromTile(tile);
+                        if (n) return n;
+                    }
+                }
+
+                return null;
+            }
+            """.replace("__BOT_NAME__", json.dumps(BOT_NAME))
+            speaker = await self.page.evaluate(js_script)
+            if speaker:
+                # Filter out the bot's own name from active speaker tags
+                if BOT_NAME.lower() in speaker.lower():
+                    return None
+                return speaker
+        except Exception:
+            pass
+        return None
+
     async def _ensure_mic_unmuted(self):
         """Ensure Google Meet mic is NOT muted so participants can hear bot audio."""
         try:
-            # Check for muted mic button (red mic button or Turn on microphone aria-label)
             muted_mic = self.page.locator('button[aria-label*="Turn on microphone" i], button[data-is-muted="true"]').first
             if await muted_mic.is_visible(timeout=1000):
                 logger.info("Microphone was muted by Meet. Unmuting via Control+d...")

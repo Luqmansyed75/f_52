@@ -6,11 +6,12 @@ Receives binary frames: [4-byte big-endian seq][640 bytes PCM 16kHz mono int16]
 Strips header, writes raw PCM into RingBuffer in 1024-byte chunks
 (matching MicListener's chunk size so Segmenter/VAD see identical frame sizes)
 
-Hard-Boundary Reconnection & Graceful Shutdown:
+Hard-Boundary Reconnection, Graceful Shutdown, & Speaker Diarization:
 - Flushes RingBuffer on disconnect and reconnect
 - Discards stale staging audio fragments
 - Dispatches on_reconnect and on_disconnect callbacks
 - Clean asyncio teardown with zero runtime tracebacks
+- Exposes thread-safe get_current_speaker() updated in real-time from Playwright DOM
 """
 
 import asyncio
@@ -38,8 +39,8 @@ MAX_RECONNECT_DELAY = 30.0
 
 class WebSocketSource:
     """
-    Drop-in replacement for MicListener with hard-boundary reconnect handling
-    and graceful shutdown lifecycle.
+    Drop-in replacement for MicListener with hard-boundary reconnect handling,
+    graceful shutdown lifecycle, and real-time speaker diarization support.
     """
 
     def __init__(
@@ -64,6 +65,10 @@ class WebSocketSource:
         self._ws = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+
+        # Speaker Diarization State
+        self._current_speaker = "unknown"
+        self._speaker_lock = threading.Lock()
 
         # Internal staging buffer for slicing into 1024-byte chunks
         self._staging_buf = bytearray()
@@ -99,7 +104,6 @@ class WebSocketSource:
         self._running = False
 
         if self._loop and self._loop.is_running():
-            # Close active websocket cleanly inside loop before shutting down
             if self._ws:
                 try:
                     asyncio.run_coroutine_threadsafe(self._close_ws(), self._loop)
@@ -153,6 +157,11 @@ class WebSocketSource:
     def session_id(self) -> str:
         return self._session_id
 
+    def get_current_speaker(self) -> str:
+        """Thread-safe getter for the current active speaker's name."""
+        with self._speaker_lock:
+            return self._current_speaker
+
     # ------------------------------------------------------------------
     # Reconnect Hard Boundary Management
     # ------------------------------------------------------------------
@@ -164,6 +173,9 @@ class WebSocketSource:
         """
         with self._buf_lock:
             self._staging_buf.clear()
+
+        with self._speaker_lock:
+            self._current_speaker = "unknown"
 
         if hasattr(self.ring_buffer, "clear"):
             try:
@@ -194,7 +206,6 @@ class WebSocketSource:
                 logger.error(f"WebSocketSource loop crashed: {e}", exc_info=True)
         finally:
             try:
-                # Cancel pending tasks cleanly
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
                     task.cancel()
@@ -340,6 +351,11 @@ class WebSocketSource:
             logger.info(f"meeting_ended received. reason={reason}")
             if self.on_meeting_ended:
                 self.on_meeting_ended(reason)
+        elif msg_type == "speaker_changed":
+            name = msg.get("name") or "unknown"
+            with self._speaker_lock:
+                self._current_speaker = name
+            logger.info(f"[Diarization] Active speaker updated: {name}")
 
     async def _heartbeat_loop(self, ws) -> None:
         while self._running:
